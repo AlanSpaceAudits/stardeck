@@ -225,7 +225,10 @@ fn ppm_frame(r: &mut impl Read) -> Res<Frame> {
 /// Kill the returned child to stop.
 pub fn spawn_video(url: &str, mut on_frame: impl FnMut(Res<Frame>) + Send + 'static) -> Res<std::process::Child> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("ffmpeg")
+    // a copy shipped next to the app wins over one on the PATH
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let bundled = std::env::current_exe().ok().and_then(|p| Some(p.parent()?.join(name))).filter(|p| p.exists());
+    let mut child = Command::new(bundled.unwrap_or_else(|| name.into()))
         .args(["-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay", "-rtsp_transport", "tcp", "-i", url])
         .args(["-vf", "scale=iw/2:ih/2", "-f", "image2pipe", "-c:v", "ppm", "-"])
         .stdin(Stdio::null())

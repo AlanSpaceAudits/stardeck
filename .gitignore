@@ -13,3 +13,4 @@ timelapse_*/
 seestar_*.png
 shots_home.png
 __pycache__/
+vendor_ffmpeg/

@@ -10,8 +10,10 @@ chrono = "0.4.45"
 eframe = "0.36.2"
 epaint_default_fonts = "0.36"
 iana-time-zone = "0.1.65"
+if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rsa = { version = "0.9.10", features = ["sha1"] }
 serde_json = "1.0.154"
 sha1 = "0.10"
+socket2 = { version = "0.6.5", features = ["all"] }
 zip = { version = "9.0.2", default-features = false, features = ["deflate"] }

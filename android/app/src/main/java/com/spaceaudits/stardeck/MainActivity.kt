@@ -312,10 +312,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
         if (link.scopeLocation.isNotEmpty()) Text("scope has ${link.scopeLocation}", style = MaterialTheme.typography.bodySmall)
 
         if (video && link.ip != null) {
-            Box(Modifier.height(420.dp).aspectRatio(9f / 16f)) {
+            Box(Modifier.size(236.dp, 420.dp)) {
                 Video("rtsp://${link.ip}:4554/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
                 if (hud) {
-                    Canvas(Modifier.fillMaxSize()) {
+                    Canvas(Modifier.matchParentSize()) {
                         val c = Offset(size.width / 2, size.height / 2)
                         val (arm, gap) = size.height / 20 to size.height / 100
                         val red = Color(0xFFFF3C3C)
@@ -331,15 +331,18 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Button({ video = !video }) { Text(if (video) "Hide video" else "Video") }
+            Button({ note = runCatching { snapshot("snap_")?.let { "saved Pictures/StarDeck/$it" } ?: "turn the video on first" }.getOrElse { "save failed: ${it.message}" } }) {
+                Text("Save snapshot")
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(hud, { hud = it }); Text("HUD")
             Checkbox(flipH, { flipH = it }); Text("flip H")
             Checkbox(flipV, { flipV = it }); Text("flip V")
         }
-        Button({ note = runCatching { snapshot("snap_")?.let { "saved Pictures/StarDeck/$it" } ?: "turn the video on first" }.getOrElse { "save failed: ${it.message}" } }) {
-            Text("Save snapshot")
-        }
+        if (note.isNotEmpty()) Text(note)
 
         Text("Shutter", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -372,7 +375,6 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
             }) { Text("Record on scope") }
             Button({ link.send("stop_record_avi") }) { Text("Stop recording") }
         }
-        if (note.isNotEmpty()) Text(note)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Button({ link.send("scope_move_to_horizon") }) { Text("Open") }

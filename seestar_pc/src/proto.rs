@@ -27,11 +27,88 @@ pub fn resolve(host: &str, port: u16) -> Res<std::net::SocketAddr> {
     if let Some(a) = (host, port).to_socket_addrs().ok().and_then(|mut it| it.find(|a| a.is_ipv4())) {
         return Ok(a);
     }
-    // the system resolver often returns only the IPv6 link-local address for .local names
-    let out = std::process::Command::new("avahi-resolve").args(["-4", "-n", host]).output()?;
-    let ip = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).map(str::to_owned);
-    let ip = ip.ok_or_else(|| format!("no IPv4 address for {host}"))?;
-    Ok(std::net::SocketAddr::new(ip.parse()?, port))
+    // System resolvers often return only an IPv6 link-local address for .local names,
+    // or do not resolve them at all; the scope listens on IPv4 only.
+    let ip = mdns_ipv4(host).ok_or_else(|| format!("no IPv4 address for {host}"))?;
+    Ok(std::net::SocketAddr::new(ip.into(), port))
+}
+
+/// One-shot mDNS A query (RFC 6762) on every local IPv4 interface.
+/// Sent from port 5353 as a group member, because host firewalls drop unicast replies to other ports.
+fn mdns_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+    const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+
+    let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in host.trim_end_matches('.').split('.') {
+        query.push(u8::try_from(label.len()).ok()?);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0, 0, 1, 0, 1]); // type A, class IN
+
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP)).ok()?;
+    sock.set_reuse_address(true).ok()?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true).ok()?;
+    sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353).into()).ok()?;
+    for iface in if_addrs::get_if_addrs().ok()? {
+        if let IpAddr::V4(ip) = iface.ip() {
+            if !ip.is_loopback() && sock.join_multicast_v4(&GROUP, &ip).is_ok() && sock.set_multicast_if_v4(&ip).is_ok() {
+                let _ = sock.send_to(&query, &SocketAddrV4::new(GROUP, 5353).into());
+            }
+        }
+    }
+    let sock: std::net::UdpSocket = sock.into();
+    sock.set_read_timeout(Some(Duration::from_millis(200))).ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut buf = [0u8; 1500];
+    let wanted = host.trim_end_matches('.').to_ascii_lowercase();
+    while std::time::Instant::now() < deadline {
+        if let Ok((n, _)) = sock.recv_from(&mut buf) {
+            // other hosts answer on the same group; keep only replies that carry our name
+            let text = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            let first_label = wanted.split('.').next().unwrap_or("");
+            if text.contains(first_label) {
+                if let Some(ip) = first_a_record(&buf[..n]) {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// First A record in the answer section of a DNS message.
+fn first_a_record(msg: &[u8]) -> Option<std::net::Ipv4Addr> {
+    fn skip_name(msg: &[u8], mut i: usize) -> Option<usize> {
+        loop {
+            let len = *msg.get(i)? as usize;
+            if len & 0xC0 == 0xC0 {
+                return Some(i + 2);
+            }
+            i += 1 + len;
+            if len == 0 {
+                return Some(i);
+            }
+        }
+    }
+    let count = |o: usize| Some(u16::from_be_bytes([*msg.get(o)?, *msg.get(o + 1)?]) as usize);
+    let (questions, answers) = (count(4)?, count(6)?);
+    let mut i = 12;
+    for _ in 0..questions {
+        i = skip_name(msg, i)? + 4;
+    }
+    for _ in 0..answers {
+        i = skip_name(msg, i)?;
+        let (rtype, rdlen) = (count(i)?, count(i + 8)?);
+        i += 10;
+        if rtype == 1 && rdlen == 4 {
+            let d = msg.get(i..i + 4)?;
+            return Some(std::net::Ipv4Addr::new(d[0], d[1], d[2], d[3]));
+        }
+        i += rdlen;
+    }
+    None
 }
 
 pub struct Scope {
@@ -88,6 +165,22 @@ impl Scope {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_a_record_after_compressed_name() {
+        let mut msg = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0];
+        msg.extend_from_slice(b"\x07SeeStar\x05local\x00\x00\x01\x00\x01"); // question
+        msg.extend_from_slice(&[0xC0, 12, 0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 0, 79]); // answer
+        assert_eq!(super::first_a_record(&msg), Some(std::net::Ipv4Addr::new(192, 168, 0, 79)));
+        assert_eq!(super::first_a_record(&msg[..20]), None);
+    }
+
+    // Live check against a scope on the network: cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn mdns_finds_the_scope() {
+        assert!(super::mdns_ipv4("SeeStar.local").is_some());
+    }
+
     // Reference value from the Python client (azel.py) for the same key and input.
     #[test]
     fn sign_matches_python_reference() {
