@@ -1,0 +1,15 @@
+# pulled and decompiled vendor files stay local
+apk/
+dex/
+native/
+jadx_out/
+jadx.log
+catalog_src/
+# build output
+dist/
+seestar_pc/target/
+*.log
+timelapse_*/
+seestar_*.png
+shots_home.png
+__pycache__/

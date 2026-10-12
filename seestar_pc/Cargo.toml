@@ -1,0 +1,17 @@
+[package]
+name = "seestar_pc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2"
+base64 = "0.23.1"
+chrono = "0.4.45"
+eframe = "0.36.2"
+epaint_default_fonts = "0.36"
+iana-time-zone = "0.1.65"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+rsa = { version = "0.9.10", features = ["sha1"] }
+serde_json = "1.0.154"
+sha1 = "0.10"
+zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
