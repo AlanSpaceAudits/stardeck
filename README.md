@@ -232,7 +232,7 @@ Tests: `cargo test` in `seestar_pc/`, and `./gradlew testDebugUnitTest` in `andr
 | `tools/make_catalog.py` | Makes the object catalogue file from the OpenNGC data |
 | `tools/make_stars.py` | Makes the star list file from the HYG database |
 | `scripts/` | Build script, Linux installer, bundle notes |
-| `seestar_key.pem` | Key for the telescope's connection handshake. Keep this repository private. |
+| `seestar_key.pem` | Key for the telescope's connection handshake |
 
 ## Credits and licences
 
