@@ -62,6 +62,11 @@ pub fn search(query: &str, limit: usize) -> Vec<&'static Object> {
     hits
 }
 
+/// The Messier objects.
+pub fn messier() -> impl Iterator<Item = &'static Object> {
+    objects().iter().filter(|o| o.other.starts_with("M "))
+}
+
 pub fn julian_date_now() -> f64 {
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
     unix / 86400.0 + 2440587.5

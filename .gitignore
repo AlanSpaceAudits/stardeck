@@ -10,6 +10,7 @@ dist/
 seestar_pc/target/
 *.log
 timelapse_*/
+starlog_*.csv
 seestar_*.png
 shots_home.png
 __pycache__/

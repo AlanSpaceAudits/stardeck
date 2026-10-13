@@ -14,6 +14,8 @@ Developed and tested on a Seestar S50 with firmware 8.46. The S30 uses the same 
 - [GPS (Android)](#gps-android)
 - [Shutter](#shutter)
 - [Timelapse](#timelapse)
+- [Recording and the save folder (PC)](#recording-and-the-save-folder-pc)
+- [Starlog (PC)](#starlog-pc)
 - [JSON output](#json-output)
 - [Limits](#limits)
 - [If something does not work](#if-something-does-not-work)
@@ -61,7 +63,7 @@ The PC bundles include `ffmpeg` for the live video. You do not need to install a
 4. Press **Open** to raise the arm.
 5. Press **Scenery**, then **Video**. For the Sun or Moon use **Solar**. For deep sky use **Star**.
 
-**Do not point the telescope at the Sun without the solar filter.** The PC app keeps the Sun button off until you tick "solar filter is fitted". The slew buttons have no such guard.
+**Do not point the telescope at the Sun without the solar filter.** In the PC app, the Sun and any target less than 20° from the Sun stay off until you tick "solar filter is fitted". The slew buttons have no such guard.
 
 The official app and StarDeck can be connected at the same time.
 
@@ -80,11 +82,15 @@ The official app and StarDeck can be connected at the same time.
 | Shutter (exposure) in milliseconds | yes | yes |
 | Timelapse frames saved by the app | yes | yes |
 | Timelapse recorded on the telescope | yes | yes |
+| Starlog: stars that cross the field centre, to CSV | no | yes |
+| Video recording to an mp4 file on the PC | no | yes |
+| Interface size buttons, size set from the monitor | no | yes |
 | JSON output of the pointing data | UDP | text lines |
 | Slew pad, open arm, park, tracking | yes | yes |
 | Focus steps and autofocus | no | yes |
 | Object search and goto | yes | yes |
-| Sun and Moon targets | no | yes |
+| Star menu: Messier objects, highest in the sky first | no | yes |
+| Solar menu: Sun, Moon and planets with their altitude | no | yes |
 | Stack start and stop, stack exposure, gain | no | yes |
 | All on/off settings of the telescope | yes | yes |
 | Raw command box with reply log | no | yes |
@@ -103,8 +109,8 @@ Lat 40.00000°  Lon -105.00000°  ±4 m
 2026-10-12 23:45:48.999 UTC (GPS)
 ```
 
-- **Save with HUD** (PC) and **Save snapshot** (Android, HUD on) write the crosshair and the data block into the pixels of the saved PNG.
-- **Save PNG** (PC), or a snapshot with the HUD off, saves the picture without them.
+- **with HUD** (PC) and **Save snapshot** (Android, HUD on) write the crosshair and the data block into the pixels of the saved PNG.
+- **Picture** (PC), or a snapshot with the HUD off, saves the picture without them.
 - The flip settings apply to the saved file as well as the display.
 - PC: files go into the folder the app starts in. With the Linux menu entry this is `~/Pictures/StarDeck`.
 - Android: files go into `Pictures/StarDeck`.
@@ -140,6 +146,36 @@ There are two types. Both use the same two fields: the interval in seconds and t
 
 For the frames saved by the app, the video must be on and the app must stay open. On Android, keep the app on the screen.
 
+## Recording and the save folder (PC)
+
+The **Capture** section on the right has the save folder. The app saves recordings, pictures, timelapse frames and star logs there. The default is the `StarDeck` folder in your home folder. Type a different path to change it. **Open** shows the folder in the file manager.
+
+- **Record** starts a recording of the scenery or solar video. The button shows the elapsed time. Press it again to stop. The file is `stardeck_<date>_<time>.mp4`.
+  - With **HUD data block** on, the recording has the data block (and the crosshair, if on) in the picture. It is made from the displayed frames, at half the size of the telescope video (540 x 960 on the S50).
+  - With **HUD data block** off, the recording is the telescope video unchanged, at its full size.
+  - The HUD setting at the start of the recording decides which of the two you get.
+- **Picture** saves the view as a PNG file. **with HUD** saves it with the data block.
+
+Star view has no video stream, so **Record** does not work there. Use the timelapse or **Picture**.
+
+The app keeps the folder, the interface size, the HUD options and the Starlog values between runs.
+
+The **Size** buttons at the top right make the interface smaller or larger. The app also sets the size from the height of the monitor when it starts.
+
+## Starlog (PC)
+
+The Starlog records each star that crosses the centre of the field while the telescope holds one azimuth and elevation. Tracking must be off.
+
+1. Set the location of the telescope.
+2. Point the telescope. Leave tracking off.
+3. Press **Starlog** in **View**. The button has a green outline while the log is on.
+
+The app writes `starlog_<date>_<time>.csv` in the save folder. Each row has the UTC time of the crossing, the latitude and longitude, the azimuth and elevation, the temperature, pressure and refraction, the RA and Dec of the field centre, the star identifiers (HIP, HD, HR, name, Bayer or Flamsteed designation, constellation), the magnitude, the spectral type, the star position of date and at J2000, and the declination offset from the centre.
+
+The **Starlog** panel on the right shows the stars that cross in the next 15 minutes, with a countdown. "within" is the largest distance from the centre for a star to count. "to mag" is the faintest magnitude. The star list covers the whole sky (about 120,000 stars) and is part of the app, so no internet connection is necessary.
+
+The app calculates the field centre from the azimuth, the elevation, the location and the PC clock. It corrects the elevation for refraction with the low-precision formula of the Explanatory Supplement to the Astronomical Almanac (Urban & Seidelmann, 2013, sec. 7.2.7.3). Enter the temperature and the pressure at the telescope in the "air" boxes. Use the pressure at the telescope, not the sea-level value. If you do not have it, enter the height above sea level and press **Set pressure** for an approximate value. A pressure of 0 switches the correction off.
+
 ## JSON output
 
 **PC:** start the app with `--json`. It prints one line for each reading:
@@ -152,7 +188,7 @@ For the frames saved by the app, the video must be on and the app must stay open
 
 `ra` is in hours. The other angles are in degrees.
 
-Other PC start options: `--video` starts the video, `--timelapse` starts saving frames. An argument without `--` is the host name or IP address.
+Other PC start options: `--video` starts the video, `--timelapse` starts saving frames, `--trace` prints each command sent to the telescope. An argument without `--` is the host name or IP address.
 
 ## Limits
 
@@ -172,7 +208,7 @@ Other PC start options: `--video` starts the video, `--timelapse` starts saving 
 | Video is one flat colour | The telescope cannot focus on near objects. Point it at something far away, then use the focus buttons. |
 | Tracking does not switch on | The telescope refuses tracking while the mount moves. Wait until it stops. |
 | A slew button does nothing | Hold the button. A short tap sends almost no movement. |
-| The telescope reports azimuth movement but the body does not turn | This is a fault in the telescope drive, not in the app. |
+| The telescope reports azimuth movement but the body does not turn | Put the telescope on its tripod. The base must be held for the body to turn. |
 
 ## Build from source
 
@@ -193,11 +229,13 @@ Tests: `cargo test` in `seestar_pc/`, and `./gradlew testDebugUnitTest` in `andr
 | `PROTOCOL.md` | Notes on the telescope's network protocol |
 | `azel.py` | Small Python client for quick checks |
 | `tools/make_catalog.py` | Makes the object catalogue file from the OpenNGC data |
+| `tools/make_stars.py` | Makes the star list file from the HYG database |
 | `scripts/` | Build script, Linux installer, bundle notes |
 | `seestar_key.pem` | Key for the telescope's connection handshake. Keep this repository private. |
 
 ## Credits and licences
 
 - Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0, https://github.com/mattiaverga/OpenNGC. The file `catalog.tsv` is derived from it and has the same licence.
+- Star list: HYG database v4.1 by David Nash, CC-BY-SA-4.0, https://codeberg.org/astronexus/hyg. The file `stars.tsv` is derived from it and has the same licence.
 - Precession: Meeus, J. (1998). *Astronomical Algorithms* (2nd ed.). Willmann-Bell.
 - The PC bundles include FFmpeg, built by https://github.com/BtbN/FFmpeg-Builds under the LGPL, version 2.1 or later. Source: https://ffmpeg.org

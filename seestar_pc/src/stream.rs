@@ -223,17 +223,22 @@ fn ppm_frame(r: &mut impl Read) -> Res<Frame> {
 
 /// Plays the scope's RTSP video (scenery / solar views) through ffmpeg, half size.
 /// Kill the returned child to stop.
-pub fn spawn_video(url: &str, mut on_frame: impl FnMut(Res<Frame>) + Send + 'static) -> Res<std::process::Child> {
+/// Starts ffmpeg on the RTSP stream. Frames go to `on_frame`; with `record`, the stream is also written
+/// unchanged to that mp4 file. Send "q" on stdin to stop and close the file.
+pub fn spawn_video(url: &str, record: Option<&std::path::Path>, mut on_frame: impl FnMut(Res<Frame>) + Send + 'static) -> Res<std::process::Child> {
     use std::process::{Command, Stdio};
     // a copy shipped next to the app wins over one on the PATH
     let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
     let bundled = std::env::current_exe().ok().and_then(|p| Some(p.parent()?.join(name))).filter(|p| p.exists());
-    let mut child = Command::new(bundled.unwrap_or_else(|| name.into()))
+    let mut command = Command::new(bundled.unwrap_or_else(|| name.into()));
+    command
         .args(["-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay", "-rtsp_transport", "tcp", "-i", url])
-        .args(["-vf", "scale=iw/2:ih/2", "-f", "image2pipe", "-c:v", "ppm", "-"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()?;
+        .args(["-vf", "scale=iw/2:ih/2", "-f", "image2pipe", "-c:v", "ppm", "-"]);
+    if let Some(path) = record {
+        // fragmented mp4: the file stays playable if ffmpeg is killed
+        command.args(["-an", "-c:v", "copy", "-movflags", "+frag_keyframe+empty_moov", "-f", "mp4"]).arg(path);
+    }
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let mut out = std::io::BufReader::new(child.stdout.take().ok_or("no ffmpeg stdout")?);
     std::thread::spawn(move || loop {
         let f = ppm_frame(&mut out);
@@ -244,6 +249,46 @@ pub fn spawn_video(url: &str, mut on_frame: impl FnMut(Res<Frame>) + Send + 'sta
         }
     });
     Ok(child)
+}
+
+/// Writes RGBA frames to an mp4 file through ffmpeg. Used for recordings with the HUD burned in;
+/// frame times are the times the frames arrive.
+pub struct HudRecorder {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    frame_len: usize,
+}
+
+impl HudRecorder {
+    pub fn start(path: &std::path::Path, width: usize, height: usize) -> Res<Self> {
+        use std::process::{Command, Stdio};
+        let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        let bundled = std::env::current_exe().ok().and_then(|p| Some(p.parent()?.join(name))).filter(|p| p.exists());
+        let mut child = Command::new(bundled.unwrap_or_else(|| name.into()))
+            .args(["-loglevel", "error", "-use_wallclock_as_timestamps", "1", "-f", "rawvideo", "-pix_fmt", "rgba"])
+            .args(["-s", &format!("{width}x{height}"), "-i", "-"])
+            // mpeg4 is in every ffmpeg build; fragmented mp4 stays playable if ffmpeg is killed
+            .args(["-an", "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p", "-fps_mode", "cfr", "-r", "30"])
+            .args(["-movflags", "+frag_keyframe+empty_moov", "-f", "mp4", "-y"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take();
+        Ok(HudRecorder { child, stdin, frame_len: width * height * 4 })
+    }
+
+    /// False when the frame could not be written (wrong size or ffmpeg gone).
+    pub fn write(&mut self, rgba: &[u8]) -> bool {
+        rgba.len() == self.frame_len && self.stdin.as_mut().is_some_and(|s| s.write_all(rgba).is_ok())
+    }
+}
+
+impl Drop for HudRecorder {
+    fn drop(&mut self) {
+        drop(self.stdin.take()); // end of input lets ffmpeg close the file
+        let _ = self.child.wait();
+    }
 }
 
 #[cfg(test)]

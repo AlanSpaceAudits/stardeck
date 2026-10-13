@@ -20,15 +20,17 @@ fn fill(rgba: &mut [u8], w: usize, h: usize, x0: i64, y0: i64, x1: i64, y1: i64,
     }
 }
 
-/// Draws a centre crosshair and `lines` of text (bottom left) into an RGBA frame.
-pub fn burn(rgba: &mut [u8], w: usize, h: usize, lines: &[String]) {
+/// Draws `lines` of text (bottom left) and, when `crosshair` is set, a centre crosshair into an RGBA frame.
+pub fn burn(rgba: &mut [u8], w: usize, h: usize, lines: &[String], crosshair: bool) {
     let (cx, cy) = (w as i64 / 2, h as i64 / 2);
     let (arm, gap, t) = ((h as i64 / 20).max(10), (h as i64 / 100).max(2), (h as i64 / 500).max(1));
     let red = [255, 60, 60];
-    fill(rgba, w, h, cx - arm, cy - t, cx - gap, cy + t, red, 1.0);
-    fill(rgba, w, h, cx + gap, cy - t, cx + arm, cy + t, red, 1.0);
-    fill(rgba, w, h, cx - t, cy - arm, cx + t, cy - gap, red, 1.0);
-    fill(rgba, w, h, cx - t, cy + gap, cx + t, cy + arm, red, 1.0);
+    if crosshair {
+        fill(rgba, w, h, cx - arm, cy - t, cx - gap, cy + t, red, 1.0);
+        fill(rgba, w, h, cx + gap, cy - t, cx + arm, cy + t, red, 1.0);
+        fill(rgba, w, h, cx - t, cy - arm, cx + t, cy - gap, red, 1.0);
+        fill(rgba, w, h, cx - t, cy + gap, cx + t, cy + arm, red, 1.0);
+    }
 
     let Ok(font) = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR) else { return };
     let font = font.as_scaled((h as f32 / 45.0).max(12.0));
@@ -77,7 +79,7 @@ mod tests {
     fn burn_and_flip() {
         let (w, h) = (300, 300);
         let mut img = vec![0u8; w * h * 4];
-        burn(&mut img, w, h, &["Az 12.3456".to_string()]);
+        burn(&mut img, w, h, &["Az 12.3456".to_string()], true);
         let px = |x: usize, y: usize| [img[(y * w + x) * 4], img[(y * w + x) * 4 + 1], img[(y * w + x) * 4 + 2]];
         assert_eq!(px(w / 2 + 8, h / 2), [255, 60, 60], "crosshair arm");
         assert_eq!(px(w / 2, h / 2), [0, 0, 0], "crosshair centre gap");

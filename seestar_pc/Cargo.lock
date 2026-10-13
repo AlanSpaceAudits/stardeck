@@ -238,6 +238,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "astro"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199632e1a87451cf771da7adeba192cab923ede42657ac3de0133ba6f4ae14be"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2945,6 +2951,7 @@ name = "seestar_pc"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "astro",
  "base64",
  "chrono",
  "eframe",
