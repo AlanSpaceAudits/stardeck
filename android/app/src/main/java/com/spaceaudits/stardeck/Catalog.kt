@@ -24,6 +24,9 @@ class Catalog(tsv: String) {
         if (f.size < 6) null else SkyObject(f[0], f[1], f[2], f[3].toDoubleOrNull() ?: return@mapNotNull null, f[4].toDoubleOrNull() ?: return@mapNotNull null, f[5])
     }.toList()
 
+    /** The Messier objects. */
+    fun messier(): List<SkyObject> = objects.filter { it.other.startsWith("M ") }
+
     /** Objects whose name or alias contains the query; exact name matches first, then prefixes. */
     fun search(query: String, limit: Int): List<SkyObject> {
         val q = squash(query)

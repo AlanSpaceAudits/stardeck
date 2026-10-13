@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Astronomy Engine is published through JitPack only
+        maven("https://jitpack.io") { content { includeGroup("io.github.cosinekitty") } }
     }
 }
 rootProject.name = "stardeck"

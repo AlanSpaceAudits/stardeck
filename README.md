@@ -63,7 +63,7 @@ The PC bundles include `ffmpeg` for the live video. You do not need to install a
 4. Press **Open** to raise the arm.
 5. Press **Scenery**, then **Video**. For the Sun or Moon use **Solar**. For deep sky use **Star**.
 
-**Do not point the telescope at the Sun without the solar filter.** In the PC app, the Sun and any target less than 20° from the Sun stay off until you tick "solar filter is fitted". The slew buttons have no such guard.
+**Do not point the telescope at the Sun without the solar filter.** In both apps, the Sun and any target less than 20° from the Sun stay off until you tick "solar filter is fitted". The slew buttons have no such guard.
 
 The official app and StarDeck can be connected at the same time.
 
@@ -89,8 +89,9 @@ The official app and StarDeck can be connected at the same time.
 | Slew pad, open arm, park, tracking | yes | yes |
 | Focus steps and autofocus | no | yes |
 | Object search and goto | yes | yes |
-| Star menu: Messier objects, highest in the sky first | no | yes |
-| Solar menu: Sun, Moon and planets with their altitude | no | yes |
+| Star menu: Messier objects, highest in the sky first | yes | yes |
+| Solar menu: Sun, Moon and planets with their altitude | yes | yes |
+| Level display: tilt bubble, compass heading, sensor calibration | yes | yes |
 | Stack start and stop, stack exposure, gain | no | yes |
 | All on/off settings of the telescope | yes | yes |
 | Raw command box with reply log | no | yes |
@@ -237,5 +238,6 @@ Tests: `cargo test` in `seestar_pc/`, and `./gradlew testDebugUnitTest` in `andr
 
 - Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0, https://github.com/mattiaverga/OpenNGC. The file `catalog.tsv` is derived from it and has the same licence.
 - Star list: HYG database v4.1 by David Nash, CC-BY-SA-4.0, https://codeberg.org/astronexus/hyg. The file `stars.tsv` is derived from it and has the same licence.
+- Planet, Sun and Moon positions on Android: Astronomy Engine by Don Cross, MIT licence, https://github.com/cosinekitty/astronomy
 - Precession: Meeus, J. (1998). *Astronomical Algorithms* (2nd ed.). Willmann-Bell.
 - The PC bundles include FFmpeg, built by https://github.com/BtbN/FFmpeg-Builds under the LGPL, version 2.1 or later. Source: https://ffmpeg.org

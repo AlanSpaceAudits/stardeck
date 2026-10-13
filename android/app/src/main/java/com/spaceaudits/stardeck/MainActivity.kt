@@ -91,6 +91,11 @@ class Link(private val keyPem: String) {
     var settings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var stackSettings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var scopeLocation by mutableStateOf("")
+    /** latitude, east longitude stored in the scope */
+    var scopeLatLon by mutableStateOf<Pair<Double, Double>?>(null)
+    /** balance_sensor and compass_sensor, refreshed quickly while the level display is open */
+    var sensors by mutableStateOf<JSONObject?>(null)
+    @Volatile var levelOpen = false
     /** "host:port"; when set, each pointing reading is also sent there as one JSON datagram. */
     @Volatile var telemetryTarget = ""
     @Volatile private var refresh = true
@@ -114,6 +119,13 @@ class Link(private val keyPem: String) {
                 status = "connected to $host"
                 // Status polling runs on its own connection so it never delays commands.
                 thread { poll(addr, gen) }
+                // The scope closes a connection that stays silent for a few seconds.
+                thread {
+                    while (gen == generation) {
+                        Thread.sleep(2000)
+                        send("test_connection", quiet = true)
+                    }
+                }
             } catch (e: Exception) {
                 status = "connect failed: ${e.message}"
             }
@@ -137,9 +149,16 @@ class Link(private val keyPem: String) {
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
-                            scopeLocation = state.optJSONArray("location_lon_lat")?.let { "lat %.4f, lon %.4f".format(it.optDouble(1), it.optDouble(0)) } ?: ""
+                            val here = state.optJSONArray("location_lon_lat")
+                            scopeLocation = here?.let { "lat %.4f, lon %.4f".format(it.optDouble(1), it.optDouble(0)) } ?: ""
+                            scopeLatLon = here?.takeIf { !it.optDouble(1).isNaN() && !it.optDouble(0).isNaN() }?.let { it.optDouble(1) to it.optDouble(0) }
                         }
-                        Thread.sleep(500)
+                        if (levelOpen) {
+                            // this subset answers in a few ms
+                            s.call("get_device_state", JSONObject().put("keys", JSONArray().put("balance_sensor").put("compass_sensor")))
+                                .optJSONObject("result")?.let { sensors = it }
+                        }
+                        Thread.sleep(if (levelOpen) 200 else 500)
                     }
                 }
             }
@@ -166,7 +185,14 @@ class Link(private val keyPem: String) {
     fun send(method: String, params: Any? = null, quiet: Boolean = false) {
         commands?.execute {
             try {
-                val r = cmdScope?.call(method, params) ?: return@execute
+                val r = try {
+                    cmdScope?.call(method, params) ?: return@execute
+                } catch (e: java.io.IOException) {
+                    // the scope dropped the connection: open a new one and send again
+                    val addr = ip ?: throw e
+                    runCatching { cmdScope?.close() }
+                    Scope(addr, keyPem).also { cmdScope = it }.call(method, params)
+                }
                 if (!quiet) refresh = true
                 if (!quiet || r.optInt("code") != 0) lastReply = "$method: ${r.optString("error").ifEmpty { "code ${r.optInt("code")}" }}"
             } catch (e: Exception) {
@@ -222,6 +248,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
     var speed by remember { mutableFloatStateOf(40f) }
     var held by remember { mutableStateOf<Int?>(null) }
     var query by remember { mutableStateOf("") }
+    var showLevel by remember { mutableStateOf(false) }
     var shutterMs by remember { mutableStateOf("10") }
     var lapseSeconds by remember { mutableStateOf("5") }
     var lapseMinutes by remember { mutableStateOf("5") }
@@ -382,10 +409,12 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
             Checkbox(link.tracking, { link.send("scope_set_track_state", it) })
             Text("tracking")
         }
+        // the phone's GPS position when locked, else the position stored in the scope
+        val site = gps.fix?.takeIf { gps.locked() }?.let { it.latitude to it.longitude } ?: link.scopeLatLon
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for ((label, mode) in listOf("Star" to "star", "Scenery" to "scenery", "Solar" to "solar_sys")) {
-                Button({ link.send("iscope_start_view", JSONObject().put("mode", mode)) }) { Text(label) }
-            }
+            StarMenu(link, catalog, site) { gps.utcMillis() }
+            Button({ link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }) { Text("Scenery") }
+            SolarMenu(link, site) { gps.utcMillis() }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button({ link.send("iscope_stop_view", JSONObject()) }) { Text("Stop view") }
@@ -403,6 +432,12 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
         Text("slew speed ${speed.toInt()} %")
         Slider(speed, { speed = it }, valueRange = 1f..100f)
         Text(link.lastReply)
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
+            Text("Level", style = MaterialTheme.typography.titleMedium)
+        }
+        if (showLevel) LevelPanel(link)
 
         Text("Go to object", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("M 31, NGC 7000, Orion Nebula") })
