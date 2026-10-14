@@ -95,3 +95,27 @@ File port (4801, `AlbumFileSocketManager`):
 - Methods: `get_img_thumbnail` (`RemotePhotoEntity`), `get_img_file_in_jpg` (`RemoteBigPhotoEntity`, `AlbumBigCellBean`): a FITS file rendered as JPEG.
 - Reply: the 80-byte frame header of the image channel, then the payload (live). `id` echoes 99; `id` 1 is a heartbeat; a 4-byte payload is skipped by the app.
 - Data type 2: the file as is (live: `get_img_thumbnail` of a stacked FITS gave a 148x264 JPEG, `get_img_file_in_jpg` a 1080x1920 JPEG, image type 4). Data type 1: failure, payload is text, e.g. `file not exist` (live). Data type 3: ZIP archive (image channel).
+
+## Network, calibration, versions
+
+From the decompiled app 3.3.0; not yet checked live. Class names are the evidence.
+
+| Action | Request | Evidence |
+|---|---|---|
+| Station state | `pi_station_state`, result `{server, ssid, ip, gateway, netmask, freq, sig_lev, key_mgmt}`. Joined when `server` and `gateway` is set | `PiStationStateCmd`, `PiStationStateSelectedBean`, `StaLoopAction`, `BaseDeviceViewModel.refreshStation` |
+| Scan | `pi_station_scan`, result list of `{ssid, freq, sig_lev, flags, ip, gateway, netmask}`. Open network when `flags` is exactly `[ESS]` | `GetStationScanCmd`, `GetWifiInfosData`, `WifiInfoData`, `StaConnectedEntity` |
+| Saved networks | `pi_station_list`, result list of SSID strings or `{ssid}` objects | `GetSavedStationListCmd.parseStationArray` |
+| Join new | `pi_station_set {"ssid","psk","hidden":false,"timeout_sec":25}`, `psk` left out for an open network; `hidden:true` for a network typed in by hand | `PiStationSetParams`, `PiStationSetCmd`, `BaseDeviceViewModel.setStationNetwork`, `DeviceStaFragment.handleAddNetwork` |
+| Join saved | `pi_station_select {"ssid"}` | `PiStationSelectCmd`, `DeviceManageAcViewModel` |
+| Forget | `pi_station_remove {"ssid"}` | `PiStationRemoveCmd`, `StaRemoveAction` |
+| Station on / off | `pi_station_open`, `pi_station_close` (no caller found in 3.3.0) | `PiStationOpenCmd`, `PiStationCloseCmd`, `PiStationSetStateAction` |
+| Hotspot | `get_device_state` key `ap`: `{ssid, passwd, is_5g}`. Change: `pi_set_ap [ssid, passwd]`; read: `pi_get_ap` | `SeestarAp`, `BaseDeviceViewModel.updateAP`, `MainCameraConstants.CMD_GET_AP_INFO` |
+| Wi-Fi country | `set_wifi_country {"country":"US"}`, ISO 3166 two-letter code, `""` = default. Current value `setting.wifi_country`. Code list: `assets/wifi_country.txt` (`lang,code,name`) | `SetWifiCountryParams`, `SettingViewModel.setWifiCountryCode`, `SeestarSetting` |
+| Dark library | `start_create_dark`, no params; `{"wide_cam":true}` for the wide camera. Stop: `iscope_stop_view {"stage":"DarkLibrary"}`. Progress `DarkLibrary {state, percent, route}` in `View` or `View.Initialise` | `StartCreateDarkParams`, `BaseDeviceViewModel.setStartCreateDark`, `stopDarkLibrary`, `ViewDarkLibrary` |
+| 3PPA | Runs in star-mode initialise when `set_setting {"auto_3ppa_calib":true}`. Stop: `iscope_stop_view {"stage":"3PPA"}`. Progress `3PPA {state, percent, calib_fail_autogoto, route}` in `View` or `View.Initialise`; event also has `has_offset` | `SetSettingParams`, `BaseDeviceViewModel.setAuto3ppa`, `stop3PPA`, `View3PPA`, `DeviceEventPart.process3ppaEvent` |
+| EQ polar alignment | `start_polar_align {"restart":true,"dec_pos_index":1..5}` (default 3), later `{"restart":false}` to measure again; `stop_polar_align`; `clear_polar_align`. Result in event `EqModePA {state, code, x_arcsec, y_arcsec, x, y}`; the app shows aligned when abs(x) and abs(y) stay at most 1 for 5 s | `StartPolarAlignResetCmd`, `EQModeChangeViewModel`, `PitchAngleEqBottomPopView`, `StopPolarAlignCmd`, `PolarAlignPart`, `EQModeChangeViewModel$property$2$1` |
+| EQ mode switch | `scope_park {"equ_mode":bool}`, after `stop_polar_align`. Mode in `get_device_state` `mount.equ_mode` | `ParkMountAndSwitchEqCmd`, `SeestarMount` |
+| Polar check | `check_pa_alt`, result `{is_valid}`; asked before a goto in EQ mode only | `CheckPaAltResult`, `GotoViewModel.checkPaAlt` |
+| Compass | `start_compass_calibration`, `stop_compass_calibration` (kit sends no params; the older `CompassCalibrationStopCmd` sends `{"force":0}`), `get_compass_state` result `{number}` | `BaseDeviceViewModel.startCompassSensor`, `stopCompassSensor`, `CompassResult` |
+| Level sensor | `start_gsensor_calibration` | `BaseDeviceViewModel.startSensorCalibration` |
+| Versions | `get_device_state` key `device`: `firmware_ver_int`, `firmware_ver_string`, `svr_ver_int`, `svr_ver_string`, `ios_ver`, `firmware_platform`. Update prompt when `firmware_ver_int < 2846` ("8.46"), forced below 2626; only for the master client (`client.is_master` not false) | `SeestarDevice`, `DeviceStateData.getNeedFwUpgrade`, `getNeedForceFwUpgrade`, `getFwNeedUpdateVersion`, `ZConfig.firmwareAuthenticationChange` |
