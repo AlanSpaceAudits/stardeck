@@ -29,6 +29,7 @@ class HudRecorder(private val context: Context, width: Int, height: Int, fps: In
     private var track = -1
     private var muxing = false
     private val info = MediaCodec.BufferInfo()
+    private var stopped = false
 
     init {
         val values = ContentValues().apply {
@@ -53,6 +54,8 @@ class HudRecorder(private val context: Context, width: Int, height: Int, fps: In
 
     @Synchronized
     fun draw(frame: Bitmap) {
+        // a frame already on its way when the recording stops is dropped
+        if (stopped) return
         val c = surface.lockHardwareCanvas()
         try {
             c.drawBitmap(frame, null, Rect(0, 0, w, h), null)
@@ -86,6 +89,8 @@ class HudRecorder(private val context: Context, width: Int, height: Int, fps: In
     /** Finishes the file and makes it visible in the gallery. */
     @Synchronized
     fun stop() {
+        if (stopped) return
+        stopped = true
         runCatching {
             codec.signalEndOfInputStream()
             drain(true)

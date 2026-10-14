@@ -527,21 +527,21 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
         if (showAdjust) AdjustPanel(link, { showAdjust = false }, Modifier.align(Alignment.Center))
 
-        // capture modes and shutter, bottom right so the HUD block keeps the bottom-left corner
-        Column(
-            Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 10.dp, bottom = 10.dp),
+        // capture modes and shutter: shown with the Controls menu, and while a recording or time-lapse runs
+        val busy = (captureMode == 2 && recording) || (captureMode == 0 && lapseRunning)
+        if (controlsOpen || recording || lapseRunning) Column(
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 84.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(Modifier.background(Color(0x88000000), RoundedCornerShape(14.dp)).padding(3.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(Modifier.background(Color(0x55000000), RoundedCornerShape(18.dp)).padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 listOf("Time-lapse", "Photo", "Video").forEachIndexed { i, label ->
                     Box(
-                        Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
-                            .clickable { captureMode = i }.padding(horizontal = 10.dp, vertical = 4.dp),
-                    ) { Text(label, color = Color.White, fontSize = 12.sp) }
+                        Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(14.dp))
+                            .clickable { captureMode = i }.padding(horizontal = 12.dp, vertical = 5.dp),
+                    ) { Text(label, color = Color.White, fontSize = 13.sp) }
                 }
             }
-            val busy = (captureMode == 2 && recording) || (captureMode == 0 && lapseRunning)
             Box(
                 Modifier.size(64.dp).background(Color.White, CircleShape).padding(4.dp)
                     .background(if (busy) Color(0xFFE53935) else Color(0xFFFFFFFF), CircleShape)
