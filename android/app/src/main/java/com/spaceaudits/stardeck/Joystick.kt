@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +13,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.atan2
@@ -56,11 +61,11 @@ private val pillOn = Color(0x66FFFFFF)
 @Composable
 fun JoystickPanel(
     fast: Boolean, onFast: (Boolean) -> Unit, tracking: Boolean, onTracking: (Boolean) -> Unit,
-    onMove: (Pair<Int, Int>?) -> Unit, modifier: Modifier = Modifier,
+    onMove: (Pair<Int, Int>?) -> Unit, modifier: Modifier = Modifier, stick: Dp = 128.dp,
 ) {
     var knob by remember { mutableStateOf(Offset.Zero) }
     Column(
-        modifier.width(136.dp).background(panel, RoundedCornerShape(20.dp)).padding(vertical = 4.dp),
+        modifier.width(stick + 8.dp).background(panel, RoundedCornerShape(20.dp)).padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -74,7 +79,7 @@ fun JoystickPanel(
             }
         }
         Canvas(
-            Modifier.size(128.dp).pointerInput(Unit) {
+            Modifier.size(stick).pointerInput(Unit) {
                 val r = size.width / 2f
                 fun update(p: Offset) {
                     var d = Offset(p.x - r, p.y - r)
@@ -115,5 +120,74 @@ fun JoystickPanel(
                 .clickable { onTracking(!tracking) },
             contentAlignment = Alignment.Center,
         ) { Text(if (tracking) "Tracking on" else "Tracking off", fontSize = 12.sp, color = Color.White) }
+    }
+}
+
+/** Where the joystick sits, whether it is folded to a button, and its size; kept between runs. */
+class JoyLayout(private val prefs: android.content.SharedPreferences) {
+    var x by mutableStateOf(prefs.getFloat("joy2_x", -1f))
+    var y by mutableStateOf(prefs.getFloat("joy2_y", -1f))
+    var collapsed by mutableStateOf(prefs.getBoolean("joy2_collapsed", false))
+    var size by mutableStateOf(prefs.getInt("joy2_size", 1)) // 0 small, 1 normal, 2 large
+
+    fun save() = prefs.edit().putFloat("joy2_x", x).putFloat("joy2_y", y).putBoolean("joy2_collapsed", collapsed).putInt("joy2_size", size).apply()
+}
+
+private val STICK_SIZES = listOf(96.dp, 128.dp, 168.dp)
+
+/**
+ * The joystick panel with a grip bar: drag the bar to move it anywhere on the screen, S/M/L to resize,
+ * and – to fold it to a small button (tap the button to unfold, drag it to move).
+ */
+@Composable
+fun MovableJoystick(
+    layout: JoyLayout, container: androidx.compose.ui.unit.IntSize,
+    fast: Boolean, onFast: (Boolean) -> Unit, tracking: Boolean, onTracking: (Boolean) -> Unit, onMove: (Pair<Int, Int>?) -> Unit,
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var own by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    // first run: lower left, clear of the capture tabs and the Settings button
+    if ((layout.x < 0 || layout.y < 0) && own.height > 0 && container.height > 0) {
+        with(density) {
+            layout.x = 8.dp.toPx()
+            layout.y = container.height - own.height - 210.dp.toPx()
+        }
+    }
+    fun moveBy(dx: Float, dy: Float) {
+        layout.x = (layout.x + dx).coerceIn(0f, (container.width - own.width).toFloat().coerceAtLeast(0f))
+        layout.y = (layout.y + dy).coerceIn(0f, (container.height - own.height).toFloat().coerceAtLeast(0f))
+    }
+    val drag = Modifier.pointerInput(Unit) {
+        detectDragGestures(onDragEnd = { layout.save() }) { change, d ->
+            change.consume()
+            moveBy(d.x, d.y)
+        }
+    }
+    Box(
+        Modifier.offset { androidx.compose.ui.unit.IntOffset(layout.x.coerceAtLeast(0f).toInt(), layout.y.coerceAtLeast(0f).toInt()) }
+            .onSizeChanged { own = it },
+    ) {
+        if (layout.collapsed) {
+            Box(
+                Modifier.size(52.dp).background(panel, androidx.compose.foundation.shape.CircleShape).then(drag)
+                    .clickable { layout.collapsed = false; layout.save() },
+                contentAlignment = Alignment.Center,
+            ) { Text("✥", color = Color.White, fontSize = 24.sp) }
+        } else {
+            val stick = STICK_SIZES[layout.size.coerceIn(0, 2)]
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(
+                    Modifier.width(stick + 8.dp).height(26.dp).background(Color(0xB3000000), RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.weight(1f).height(26.dp).then(drag), contentAlignment = Alignment.Center) { Text("⠿ move", color = Color.White, fontSize = 11.sp) }
+                    Text(listOf("S", "M", "L")[layout.size.coerceIn(0, 2)], color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.clickable { layout.size = (layout.size + 1) % 3; layout.save() }.padding(horizontal = 8.dp))
+                    Text("–", color = Color.White, fontSize = 16.sp,
+                        modifier = Modifier.clickable { layout.collapsed = true; layout.save() }.padding(horizontal = 8.dp))
+                }
+                JoystickPanel(fast, onFast, tracking, onTracking, onMove, stick = stick)
+            }
+        }
     }
 }

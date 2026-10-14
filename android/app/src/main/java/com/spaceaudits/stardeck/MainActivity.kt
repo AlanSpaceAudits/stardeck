@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -101,6 +102,8 @@ class Link(private val keyPem: String) {
     var lastReply by mutableStateOf("")
     /** Every on/off setting the scope reports, including ones the official app hides. */
     var settings by mutableStateOf<Map<String, Boolean>>(emptyMap())
+    /** the scope's whole `setting` object, for values that are not on/off */
+    var setting by mutableStateOf<JSONObject?>(null)
     var stackSettings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var scopeLocation by mutableStateOf("")
     var battery by mutableStateOf("")
@@ -161,6 +164,7 @@ class Link(private val keyPem: String) {
                             val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status"))).optJSONObject("result") ?: JSONObject()
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
+                            this@Link.setting = setting
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
                             state.optJSONObject("pi_status")?.let { battery = "${it.optInt("battery_capacity")}%" + if (it.optBoolean("charge_online")) " ⚡" else "" }
                             val here = state.optJSONArray("location_lon_lat")
@@ -277,6 +281,9 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var fast by remember { mutableStateOf(true) }
     var joystickOn by remember { mutableStateOf(true) }
     var sheetOpen by remember { mutableStateOf(false) }
+    var showAdjust by remember { mutableStateOf(false) }
+    var screenSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val joyLayout = remember { JoyLayout(context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE)) }
     var captureMode by remember { mutableIntStateOf(1) } // 0 time-lapse, 1 photo, 2 video
     var query by remember { mutableStateOf("") }
     var showLevel by remember { mutableStateOf(false) }
@@ -385,7 +392,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     val lines = remember(tick, link.pointing, gps.fix, Prefs.dms) { hudLines(link.pointing, gps) }
 
     // Observation screen: the video fills the screen and the controls sit on top of it, as in the official app.
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Color.Black).onSizeChanged { screenSize = it }) {
         val ip = link.ip
         if (ip != null) {
             Video("rtsp://$ip:4554/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
@@ -442,6 +449,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             OverlayButton("Stop view") { link.send("iscope_stop_view", JSONObject()) }
             OverlayButton("Open") { link.send("scope_move_to_horizon") }
             OverlayButton("Park") { link.send("scope_park") }
+            OverlayButton("Exposure") { showAdjust = !showAdjust }
             OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
         }
 
@@ -449,17 +457,15 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         if (hud) {
             Text(
                 lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, color = Color.White,
-                modifier = Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(start = 8.dp, bottom = 132.dp)
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 84.dp)
                     .background(Color(0xA5000000)).padding(4.dp),
             )
         }
 
         if (joystickOn) {
-            JoystickPanel(
-                fast, { fast = it }, link.tracking, { link.send("scope_set_track_state", it) }, { joy = it },
-                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 12.dp, bottom = 200.dp),
-            )
+            MovableJoystick(joyLayout, screenSize, fast, { fast = it }, link.tracking, { link.send("scope_set_track_state", it) }, { joy = it })
         }
+        if (showAdjust) AdjustPanel(link, { showAdjust = false }, Modifier.align(Alignment.Center))
 
         // capture modes and shutter
         Column(
