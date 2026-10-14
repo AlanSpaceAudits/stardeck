@@ -928,6 +928,29 @@ fun Video(url: String, modifier: Modifier, onView: (PlayerView?) -> Unit) {
             playWhenReady = true
         }
     }
+    // the RTSP port is closed until a view starts, and the stream drops when the view changes: retry
+    DisposableEffect(exo) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                handler.postDelayed({ exo.prepare() }, 2000)
+            }
+        }
+        exo.addListener(listener)
+        onDispose { handler.removeCallbacksAndMessages(null); exo.removeListener(listener) }
+    }
+    // a stopped and restarted view can leave the stream open but silent, with no error
+    LaunchedEffect(exo) {
+        var last = -1
+        var still = 0
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            val shown = exo.videoDecoderCounters?.renderedOutputBufferCount ?: 0
+            still = if (shown == last) still + 1 else 0
+            last = shown
+            if (still >= 3 && exo.playerError == null) { exo.stop(); exo.prepare(); still = 0 }
+        }
+    }
     DisposableEffect(exo) {
         onDispose {
             onView(null)
