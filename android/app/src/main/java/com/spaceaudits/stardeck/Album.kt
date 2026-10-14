@@ -163,17 +163,17 @@ fun downloadAlbumFile(context: Context, ip: String, item: AlbumItem, onProgress:
 }
 
 /** 80-byte big-endian frame header used on ports 4800, 4804 and 4801. */
-data class FrameHeader(val magic: Int, val length: Int, val imgType: Int, val dataType: Int, val id: Int, val width: Int, val height: Int) {
+data class FileFrameHeader(val magic: Int, val length: Int, val imgType: Int, val dataType: Int, val id: Int, val width: Int, val height: Int) {
     val isHeartbeat get() = id == 1
 }
 
 const val FRAME_MAGIC = 0x03C3
 const val FRAME_HEADER_SIZE = 80
 
-fun parseFrameHeader(h: ByteArray): FrameHeader {
+fun parseFrameHeader(h: ByteArray): FileFrameHeader {
     require(h.size >= FRAME_HEADER_SIZE) { "header too short" }
     val b = ByteBuffer.wrap(h) // big-endian
-    return FrameHeader(
+    return FileFrameHeader(
         b.getShort(0).toInt() and 0xFFFF, b.getInt(6), h[13].toInt() and 0xFF, h[14].toInt() and 0xFF, h[15].toInt() and 0xFF,
         b.getShort(16).toInt() and 0xFFFF, b.getShort(18).toInt() and 0xFFFF,
     )

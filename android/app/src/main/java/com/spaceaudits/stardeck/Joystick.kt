@@ -146,11 +146,11 @@ fun MovableJoystick(
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     var own by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
-    // first run: lower left, clear of the capture tabs and the Settings button
+    // first run: lower left, above the HUD block
     if ((layout.x < 0 || layout.y < 0) && own.height > 0 && container.height > 0) {
         with(density) {
             layout.x = 8.dp.toPx()
-            layout.y = container.height - own.height - 210.dp.toPx()
+            layout.y = container.height - own.height - 120.dp.toPx()
         }
     }
     fun moveBy(dx: Float, dy: Float) {

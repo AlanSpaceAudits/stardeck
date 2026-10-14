@@ -282,6 +282,13 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var joystickOn by remember { mutableStateOf(true) }
     var sheetOpen by remember { mutableStateOf(false) }
     var showAdjust by remember { mutableStateOf(false) }
+    val stream = rememberImageStream(link)
+    var showStar by remember { mutableStateOf(false) }
+    LaunchedEffect(stream.frame != null) { if (stream.frame != null) showStar = true }
+    var showFocus by remember { mutableStateOf(false) }
+    var showStack by remember { mutableStateOf(false) }
+    var showDevice by remember { mutableStateOf(false) }
+    var showAlbum by remember { mutableStateOf(false) }
     var screenSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val joyLayout = remember { JoyLayout(context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE)) }
     var captureMode by remember { mutableIntStateOf(1) } // 0 time-lapse, 1 photo, 2 video
@@ -399,18 +406,35 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         } else {
             Text(link.status, Modifier.align(Alignment.Center).padding(24.dp), color = Color.White)
         }
-        if (hud) {
-            Canvas(Modifier.fillMaxSize()) {
-                val c = Offset(size.width / 2, size.height / 2)
-                val (arm, gap) = size.minDimension / 12 to size.minDimension / 60
-                val red = Color(0xFFFF3C3C)
-                drawLine(red, c - Offset(arm, 0f), c - Offset(gap, 0f), 3f)
-                drawLine(red, c + Offset(gap, 0f), c + Offset(arm, 0f), 3f)
-                drawLine(red, c - Offset(0f, arm), c - Offset(0f, gap), 3f)
-                drawLine(red, c + Offset(0f, gap), c + Offset(0f, arm), 3f)
+        // The picture's own rectangle (video fitted to the screen), so the crosshair and the HUD block sit
+        // inside the frame exactly where recordings and snapshots burn them in.
+        val starFrame = stream.frame?.takeIf { showStar }
+        if (starFrame != null) StarImage(stream, Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f))
+        val aspect = when {
+            starFrame != null -> starFrame.width.toFloat() / starFrame.height
+            else -> (player?.videoSurfaceView as? TextureView)?.takeIf { it.width > 0 && it.height > 0 }?.let { it.width.toFloat() / it.height } ?: (9f / 16f)
+        }
+        if (hud && screenSize.width > 0) {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val (fw, fh) = screenSize.width.toFloat() to screenSize.height.toFloat()
+            val w = minOf(fw, fh * aspect)
+            val h = w / aspect
+            Box(Modifier.align(Alignment.Center).size(with(density) { w.toDp() }, with(density) { h.toDp() })) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val c = Offset(size.width / 2, size.height / 2)
+                    val (arm, gap) = size.minDimension / 12 to size.minDimension / 60
+                    val red = Color(0xFFFF3C3C)
+                    drawLine(red, c - Offset(arm, 0f), c - Offset(gap, 0f), 3f)
+                    drawLine(red, c + Offset(gap, 0f), c + Offset(arm, 0f), 3f)
+                    drawLine(red, c - Offset(0f, arm), c - Offset(0f, gap), 3f)
+                    drawLine(red, c + Offset(0f, gap), c + Offset(0f, arm), 3f)
+                }
+                Text(
+                    lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, color = Color.White,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color(0xA5000000)).padding(4.dp),
+                )
             }
         }
-
         // top bar
         Column(Modifier.fillMaxWidth().background(Color(0x88000000)).statusBarsPadding()) {
             Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -450,16 +474,8 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             OverlayButton("Open") { link.send("scope_move_to_horizon") }
             OverlayButton("Park") { link.send("scope_park") }
             OverlayButton("Exposure") { showAdjust = !showAdjust }
+            if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
             OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
-        }
-
-        // HUD data block
-        if (hud) {
-            Text(
-                lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, color = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 84.dp)
-                    .background(Color(0xA5000000)).padding(4.dp),
-            )
         }
 
         if (joystickOn) {
@@ -467,23 +483,23 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
         if (showAdjust) AdjustPanel(link, { showAdjust = false }, Modifier.align(Alignment.Center))
 
-        // capture modes and shutter
+        // capture modes and shutter, bottom right so the HUD block keeps the bottom-left corner
         Column(
-            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp),
+            Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 10.dp, bottom = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(Modifier.background(Color(0x88000000), RoundedCornerShape(20.dp)).padding(4.dp)) {
+            Column(Modifier.background(Color(0x88000000), RoundedCornerShape(14.dp)).padding(3.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 listOf("Time-lapse", "Photo", "Video").forEachIndexed { i, label ->
                     Box(
-                        Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(16.dp))
-                            .clickable { captureMode = i }.padding(horizontal = 14.dp, vertical = 6.dp),
-                    ) { Text(label, color = Color.White, fontSize = 13.sp) }
+                        Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clickable { captureMode = i }.padding(horizontal = 10.dp, vertical = 4.dp),
+                    ) { Text(label, color = Color.White, fontSize = 12.sp) }
                 }
             }
             val busy = (captureMode == 2 && recorder != null) || (captureMode == 0 && lapseRunning)
             Box(
-                Modifier.size(70.dp).background(Color.White, CircleShape).padding(5.dp)
+                Modifier.size(64.dp).background(Color.White, CircleShape).padding(4.dp)
                     .background(if (busy) Color(0xFFE53935) else Color(0xFFFFFFFF), CircleShape)
                     .clickable {
                         when (captureMode) {
@@ -494,17 +510,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                if (!busy) Box(Modifier.size(54.dp).background(if (captureMode == 2) Color(0xFFE53935) else Color(0xFFDDDDDD), CircleShape))
-                else Box(Modifier.size(24.dp).background(Color.White, RoundedCornerShape(4.dp)))
+                if (!busy) Box(Modifier.size(50.dp).background(if (captureMode == 2) Color(0xFFE53935) else Color(0xFFDDDDDD), CircleShape))
+                else Box(Modifier.size(22.dp).background(Color.White, RoundedCornerShape(4.dp)))
             }
         }
-
-        // settings
-        TextButton(
-            { sheetOpen = true },
-            Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(start = 8.dp, bottom = 24.dp)
-                .background(Color(0x88000000), RoundedCornerShape(20.dp)),
-        ) { Text("Settings", color = Color.White) }
     }
 
     if (sheetOpen) {
@@ -581,6 +590,19 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                     Checkbox(link.tracking, { link.send("scope_set_track_state", it) })
                     Text("tracking")
                 }
+
+                @Composable
+                fun Section(title: String, open: Boolean, onOpen: (Boolean) -> Unit, content: @Composable () -> Unit) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(open, onOpen)
+                        Text(title, style = MaterialTheme.typography.titleMedium)
+                    }
+                    if (open) content()
+                }
+                Section("Focus", showFocus, { showFocus = it }) { FocusPanel(link) }
+                Section("Stacking and star image", showStack, { showStack = it }) { StackPanel(link, stream, gps, hud) }
+                Section("Album", showAlbum, { showAlbum = it }) { AlbumPanel(link) }
+                Section("Device", showDevice, { showDevice = it }) { DevicePanel(link) }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
