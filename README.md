@@ -88,6 +88,8 @@ The official app and StarDeck can be connected at the same time.
 | Interface size buttons, size set from the monitor | no | yes |
 | JSON output of the pointing data | UDP | text lines |
 | Slew pad, open arm, park, tracking | yes | yes |
+| Storage choice: Seestar and phone, Seestar only, phone only; RAW video on the Seestar | yes | no |
+| Zoom 1x / 2x / 4x, planet centring, object tracking (draw a box on the picture) | yes | no |
 | Focus steps and autofocus | no | yes |
 | Object search and goto | yes | yes |
 | Star menu: Messier objects, highest in the sky first | yes | yes |

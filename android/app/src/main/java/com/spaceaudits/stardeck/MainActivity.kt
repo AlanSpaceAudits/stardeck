@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -271,6 +272,12 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var showStarlog by remember { mutableStateOf(false) }
     var recorder by remember { mutableStateOf<HudRecorder?>(null) }
     var recording by remember { mutableStateOf(false) }
+    var seestarRecording by remember { mutableStateOf(false) }
+    var tracking by remember { mutableStateOf(false) } // object tracking
+    var selectingTrack by remember { mutableStateOf(false) }
+    var planetCentre by remember { mutableStateOf(false) }
+    var zoom by remember { mutableIntStateOf(0) }
+    var showFocusCard by remember { mutableStateOf(false) }
     var recordStart by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var host by remember { mutableStateOf("SeeStar.local") }
@@ -285,6 +292,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var showAdjust by remember { mutableStateOf(false) }
     val appPrefs = remember { context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE) }
     var controlsOpen by remember { mutableStateOf(appPrefs.getBoolean("controls_open", false)) }
+    LaunchedEffect(Unit) {
+        Storage.target = appPrefs.getInt("storage", Storage.BOTH)
+        Storage.raw = appPrefs.getBoolean("storage_raw", false)
+    }
     val stream = rememberImageStream(link)
     var showStar by remember { mutableStateOf(false) }
     LaunchedEffect(stream.frame != null) { if (stream.frame != null) showStar = true }
@@ -368,7 +379,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         val start = System.currentTimeMillis()
         lapseSaved = 0
         while (minutes <= 0 || System.currentTimeMillis() - start < minutes * 60000) {
-            runCatching { snapshot() }.onSuccess { if (it != null) lapseSaved++ }.onFailure { note = "timelapse: ${it.message}" }
+            if (Storage.onPhone) runCatching { snapshot() }.onSuccess { if (it != null) lapseSaved++ }.onFailure { note = "timelapse: ${it.message}" }
             delay(interval)
         }
         lapseRunning = false
@@ -397,40 +408,48 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     fun toggleTimelapse() {
         if (lapseRunning) {
             lapseRunning = false
-            link.send("stop_record_avi")
+            if (Storage.onSeestar) link.send("stop_record_avi")
             return
         }
         val minutes = (lapseMinutes.toDoubleOrNull() ?: 0.0).let { if (it > 0) Math.round(it).toInt() else -1 }
         val every = Math.round(lapseSeconds.toDoubleOrNull() ?: 5.0).toInt().coerceAtLeast(1)
-        link.send("start_record_avi", JSONObject().put("raw", false)
+        if (Storage.onSeestar) link.send("start_record_avi", JSONObject().put("raw", Storage.raw)
             .put("timelapse", JSONObject().put("enable", true).put("delay_sec", every).put("src_dura_min", minutes)))
         lapseRunning = true
     }
 
-    // Video: the scope records the full-resolution original; the phone records the HUD copy.
+    // Video: the Seestar records the full-size original, the phone records the HUD copy (per the Storage choice).
     fun toggleRecording() {
         if (recording) {
             recording = false
-            link.send("stop_record_avi")
+            if (seestarRecording) link.send("stop_record_avi")
             val r = recorder
             recorder = null
             if (r != null) thread { runCatching { r.stop() } }
-            note = if (r != null) "saved on the scope and Movies/StarDeck/${r.name}" else "saved on the scope"
+            note = listOfNotNull("the Seestar".takeIf { seestarRecording }, r?.let { "Movies/StarDeck/${it.name}" })
+                .joinToString(" and ").let { if (it.isEmpty()) "" else "saved on $it" }
+            seestarRecording = false
             return
         }
-        link.send("start_record_avi", JSONObject().put("raw", false)
+        seestarRecording = Storage.onSeestar
+        if (seestarRecording) link.send("start_record_avi", JSONObject().put("raw", Storage.raw)
             .put("timelapse", JSONObject().put("enable", false).put("delay_sec", 0).put("src_dura_min", 0)))
         recording = true
         recordStart = System.currentTimeMillis()
+        if (!Storage.onPhone) {
+            note = "recording on the Seestar"
+            return
+        }
         val view = player?.videoSurfaceView as? TextureView
         if (view == null || view.width == 0) {
-            note = "recording on the scope only: no video on the phone"
+            note = if (seestarRecording) "recording on the Seestar only: no video on the phone" else "no video yet: start a view"
+            if (!seestarRecording) recording = false
             return
         }
         val name = epochName(gps.utcMillis(), "mp4")
         runCatching { HudRecorder(context, view.width, view.height, 15, name) }
-            .onSuccess { recorder = it; note = "recording on the scope and Movies/StarDeck/$name" }
-            .onFailure { note = "recording on the scope only; phone copy failed: ${it.message}" }
+            .onSuccess { recorder = it; note = "recording" + (if (seestarRecording) " on the Seestar and" else "") + " Movies/StarDeck/$name" }
+            .onFailure { note = "phone copy failed: ${it.message}" }
     }
 
     val lines = remember(tick, link.pointing, gps.fix, Prefs.dms) { hudLines(link.pointing, gps) }
@@ -452,6 +471,20 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             // the decoder's picture size; the view itself fills the screen before the first frame
             else -> (player?.player as? ExoPlayer)?.videoSize?.takeIf { it.width > 0 && it.height > 0 }
                 ?.let { it.width * it.pixelWidthHeightRatio / it.height } ?: (9f / 16f)
+        }
+        if (selectingTrack && screenSize.width > 0) {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val (fw, fh) = screenSize.width.toFloat() to screenSize.height.toFloat()
+            val w = minOf(fw, fh * aspect)
+            val h = w / aspect
+            val vs = (player?.player as? ExoPlayer)?.videoSize
+            Box(Modifier.align(Alignment.Center).size(with(density) { w.toDp() }, with(density) { h.toDp() })) {
+                TrackSelector(vs?.width ?: 0, vs?.height ?: 0, flipH, flipV) { x, y, bw, bh ->
+                    link.send("start_track_object", JSONObject().put("x", x).put("y", y).put("width", bw).put("height", bh))
+                    selectingTrack = false
+                    tracking = true
+                }
+            }
         }
         if (hud && screenSize.width > 0) {
             val density = androidx.compose.ui.platform.LocalDensity.current
@@ -509,7 +542,13 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 controlsOpen = !controlsOpen
                 appPrefs.edit().putBoolean("controls_open", controlsOpen).apply()
             }
-            if (controlsOpen) {
+            // scrolls when it is taller than the space above the shutter and the HUD block
+            if (controlsOpen) Column(
+                Modifier.heightIn(max = with(androidx.compose.ui.platform.LocalDensity.current) { screenSize.height.toDp() } - 400.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 StarMenu(link, catalog, site) { gps.utcMillis() }
                 OverlayButton("Scenery") { link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }
                 SolarMenu(link, site) { gps.utcMillis() }
@@ -517,6 +556,23 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 OverlayButton("Open") { link.send("scope_move_to_horizon") }
                 OverlayButton("Park") { link.send("scope_park") }
                 OverlayButton("Exposure") { showAdjust = !showAdjust }
+                OverlayButton("Focus") { showFocusCard = !showFocusCard }
+                // the scope does not report rtsp_roi_index back, so the app keeps it
+                OverlayButton("Zoom ${listOf(1, 2, 4)[zoom]}x") {
+                    zoom = (zoom + 1) % 3
+                    link.send("set_setting", JSONObject().put("rtsp_roi_index", zoom))
+                }
+                OverlayButton(if (planetCentre) "Centre planet: on" else "Centre planet: off") {
+                    planetCentre = !planetCentre
+                    link.send("set_setting", JSONObject().put("planet_correction", planetCentre))
+                }
+                OverlayButton(if (tracking) "Stop tracking" else if (selectingTrack) "Cancel box" else "Track object") {
+                    when {
+                        tracking -> { tracking = false; link.send("iscope_stop_view", JSONObject().put("stage", "ObjectTrack")) }
+                        else -> selectingTrack = !selectingTrack
+                    }
+                }
+                StorageMenu { appPrefs.edit().putInt("storage", Storage.target).putBoolean("storage_raw", Storage.raw).apply() }
                 if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
                 OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
             }
@@ -526,6 +582,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             MovableJoystick(joyLayout, screenSize, fast, { fast = it }, link.tracking, { link.send("scope_set_track_state", it) }, { joy = it })
         }
         if (showAdjust) AdjustPanel(link, { showAdjust = false }, Modifier.align(Alignment.Center))
+        if (showFocusCard) FloatingCard("Focus", { showFocusCard = false }, Modifier.align(Alignment.Center).width(320.dp)) { FocusPanel(link) }
 
         // capture modes and shutter: shown with the Controls menu, and while a recording or time-lapse runs
         val busy = (captureMode == 2 && recording) || (captureMode == 0 && lapseRunning)
@@ -550,10 +607,11 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                         when (captureMode) {
                             0 -> toggleTimelapse()
                             1 -> {
-                                // full-resolution original in the scope album, HUD copy on the phone
-                                link.send("save_image")
-                                note = runCatching { snapshot()?.let { "saved on the scope and Pictures/StarDeck/$it" } ?: "saved on the scope" }
-                                    .getOrElse { "saved on the scope; phone copy failed: ${it.message}" }
+                                // full-size original in the Seestar album, HUD copy on the phone (per the Storage choice)
+                                if (Storage.onSeestar) link.send("save_image")
+                                val phone = if (Storage.onPhone) runCatching { snapshot() }.getOrElse { note = "phone copy failed: ${it.message}"; null } else null
+                                note = listOfNotNull("the Seestar".takeIf { Storage.onSeestar }, phone?.let { "Pictures/StarDeck/$it" })
+                                    .joinToString(" and ").let { if (it.isEmpty()) note else "saved on $it" }
                             }
                             else -> toggleRecording()
                         }
