@@ -1,10 +1,15 @@
 package com.spaceaudits.stardeck
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -39,8 +44,32 @@ const val LEVEL_OK_DEG = 0.5
 private fun altText(alt: Double?) = alt?.let { "  alt %.0f°".format(it) } ?: ""
 
 /** Star view, or a goto to a Messier object. Objects above 15° are listed, highest first. */
+/** Options set on the scope before a star goto, so the first frames already use them. */
+object GotoOptions {
+    var lpFilter by mutableStateOf(false)
+    /** stack exposure in ms; null leaves the scope's setting */
+    var exposureMs by mutableStateOf<Int?>(null)
+}
+
+/** Sends the goto options, then the goto. RA hours and Dec degrees of date. */
+fun starGoto(link: Link, name: String, raHours: Double, decDeg: Double) {
+    GotoOptions.exposureMs?.let { link.send("set_setting", JSONObject().put("exp_ms", JSONObject().put("stack_l", it))) }
+    link.send("iscope_start_view", JSONObject().put("mode", "star").put("selected_cam", "View")
+        .put("target_name", name).put("target_ra_dec", JSONArray().put(raHours).put(decDeg)).put("lp_filter", GotoOptions.lpFilter))
+}
+
+/** Parses "5.5", "5 30 0" or "5:30:00" (hours or degrees, minutes, seconds) to a decimal number. */
+fun parseSexagesimal(text: String): Double? {
+    val t = text.trim().replace(Regex("[hdms°′″'\":]"), " ").trim()
+    val parts = t.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (parts.isEmpty() || parts.size > 3) return null
+    val nums = parts.map { it.toDoubleOrNull() ?: return null }
+    val sign = if (parts[0].startsWith("-")) -1.0 else 1.0
+    return sign * (kotlin.math.abs(nums[0]) + nums.getOrElse(1) { 0.0 } / 60 + nums.getOrElse(2) { 0.0 } / 3600)
+}
+
 @Composable
-fun StarMenu(link: Link, catalog: Catalog, site: Pair<Double, Double>?, utcMillis: () -> Long) {
+fun StarMenu(link: Link, catalog: Catalog, site: Pair<Double, Double>?, utcMillis: () -> Long, onCustom: () -> Unit = {}) {
     var open by remember { mutableStateOf(false) }
     Box {
         OverlayButton("Star ▾") { open = true }
@@ -49,6 +78,20 @@ fun StarMenu(link: Link, catalog: Catalog, site: Pair<Double, Double>?, utcMilli
                 link.send("iscope_start_view", JSONObject().put("mode", "star"))
                 open = false
             })
+            DropdownMenuItem({ Text("Custom target (name, RA, Dec)…") }, { open = false; onCustom() })
+            HorizontalDivider()
+            // set before the goto, as owners asked for: filter and exposure are right from the first frame
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp)) {
+                Checkbox(GotoOptions.lpFilter, { GotoOptions.lpFilter = it }); Text("LP filter")
+            }
+            Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("exposure", fontSize = 13.sp)
+                for ((label, ms) in listOf("keep" to null, "10 s" to 10000, "20 s" to 20000, "30 s" to 30000)) {
+                    Text(label, fontSize = 13.sp, modifier = Modifier.background(
+                        if (GotoOptions.exposureMs == ms) Color(0x66FFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(10.dp),
+                    ).clickable { GotoOptions.exposureMs = ms }.padding(horizontal = 8.dp, vertical = 3.dp))
+                }
+            }
             HorizontalDivider()
             val now = utcMillis()
             val jd = now / 86400000.0 + 2440587.5
@@ -61,8 +104,7 @@ fun StarMenu(link: Link, catalog: Catalog, site: Pair<Double, Double>?, utcMilli
             for ((o, raDec, alt) in rows) {
                 val names = o.other.split('|')
                 DropdownMenuItem({ Text("${names[0]}  ${names.getOrElse(1) { o.name }}  ${o.kind}  mag ${o.mag.ifEmpty { "?" }}${altText(alt)}") }, {
-                    link.send("iscope_start_view", JSONObject().put("mode", "star").put("selected_cam", "View")
-                        .put("target_name", names[0]).put("target_ra_dec", JSONArray().put(raDec.first).put(raDec.second)).put("lp_filter", false))
+                    starGoto(link, names[0], raDec.first, raDec.second)
                     open = false
                 })
             }

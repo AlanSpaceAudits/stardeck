@@ -102,6 +102,7 @@
     <button id="parkBtn">Park</button>
     <button id="trackBtn">Tracking off</button>
     <button data-open="adjustCard">Exposure</button>
+    <button id="heaterBtn">Dew heater: off</button>
     <button id="zoomBtn">Zoom 1x</button>
     <button data-open="reticleCard">Reticle</button>
     <button id="joyBtn">Hide stick</button>
@@ -176,6 +177,7 @@
   <div class="row"><label><input type="checkbox" id="dms"> angles in degrees, minutes, seconds</label></div>
   <div class="row"><label><input type="checkbox" id="hudOn" checked> HUD data block</label></div>
   <div class="row"><label><input type="checkbox" id="flipH"> flip H</label><label><input type="checkbox" id="flipV"> flip V</label></div>
+  <div class="row"><label>Label <input id="label" size="18" placeholder="file names and HUD"></label></div>
   <div class="row"><label>Storage
     <select id="storage"><option value="both">Seestar and this computer</option><option value="seestar">Seestar only</option><option value="local">This computer only</option></select></label></div>
   <p class="small">The Seestar keeps its full-size picture. This computer keeps a copy with the HUD burned in (PNG, or WebM for video).</p>
@@ -197,7 +199,7 @@ const prefs = {
   dms: store.get("dms", false), hud: store.get("hud", true), flipH: store.get("flipH", false), flipV: store.get("flipV", false),
   storage: store.get("storage", "both"), shape: store.get("shape", 1), size: store.get("size", 600),
   rings: store.get("rings", false), retLabel: store.get("retLabel", true), joy: store.get("joy", null), joyFolded: store.get("joyFolded", false),
-  controlsOpen: store.get("controlsOpen", false),
+  controlsOpen: store.get("controlsOpen", false), label: store.get("label", ""),
 };
 function save() { for (const k in prefs) store.set(k, prefs[k]); }
 
@@ -288,6 +290,7 @@ async function refreshDevice() {
   if (s.camera) state.camera = s.camera;
   if (s.device && s.device.focal_len) state.focal = s.device.focal_len;
   $("battery").textContent = state.battery;
+  $("heaterBtn").textContent = state.setting && state.setting.heater_enable ? "Dew heater: on" : "Dew heater: off";
   $("device").textContent = [
     s.device ? `${s.device.product_model || ""}  firmware ${s.device.firmware_ver_string || "?"}` : "",
     s.ap ? `Hotspot ${s.ap.ssid}  password ${s.ap.passwd}` : "",
@@ -351,6 +354,7 @@ function drawReticle() {
 function hudLines() {
   const p = state.pointing || {}, s = state.site, sized = [2, 3, 4].includes(prefs.shape);
   const lines = [];
+  if (prefs.label.trim()) lines.push(`Target ${prefs.label.trim()}`);
   if (prefs.retLabel && sized) lines.push(`Reticle ${fmtArcsec(prefs.size)}` + (p.dec != null ? `  crossing ${crossingSeconds(prefs.size, p.dec).toFixed(2)} s` : ""));
   lines.push(`Az ${fmtDeg(p.az, false)}  El ${fmtDeg(p.alt)}`);
   lines.push(s ? `Lat ${fmtDeg(s.lat, true, 5)}  Lon ${fmtDeg(s.lon, true, 5)}` : "Lat --  Lon --");
@@ -377,6 +381,7 @@ function showTracking() { const t = state.tracking ? "Tracking on" : "Tracking o
 $("trackBtn").onclick = $("joyTrackBtn").onclick = () => send("scope_set_track_state", !state.tracking);
 // the scope does not report rtsp_roi_index back, so the page keeps it
 $("zoomBtn").onclick = () => { zoom = (zoom + 1) % 3; $("zoomBtn").textContent = `Zoom ${[1, 2, 4][zoom]}x`; send("set_setting", { rtsp_roi_index: zoom }); drawReticle(); };
+$("heaterBtn").onclick = () => send("pi_output_set2", { heater: { state: !(state.setting && state.setting.heater_enable), value: 90 } }).then(refreshDevice);
 $("joyBtn").onclick = () => { const j = $("joy"); j.hidden = !j.hidden; $("joyBtn").textContent = j.hidden ? "Joystick" : "Hide stick"; };
 
 // star and solar targets
@@ -472,7 +477,8 @@ function composite(canvas) {
   }
   return true;
 }
-function download(blob, ext) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${Math.floor(Date.now() / 1000)}.${ext}`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+function download(blob, ext) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  const tag = prefs.label.trim().replace(/[^A-Za-z0-9_-]+/g, "_"); a.download = `${tag ? tag + "_" : ""}${Math.floor(Date.now() / 1000)}.${ext}`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
 $("shutter").onclick = () => {
   if (mode === "photo") {
     if (onSeestar()) send("save_image");
@@ -564,6 +570,8 @@ for (const id of ["dms", "hudOn", "flipH", "flipV"]) {
   const key = id === "hudOn" ? "hud" : id; $(id).checked = prefs[key];
   $(id).onchange = (e) => { prefs[key] = e.target.checked; save(); layout(); drawHud(); updateReticleCard(); };
 }
+$("label").value = prefs.label;
+$("label").oninput = (e) => { prefs.label = e.target.value; save(); };
 $("storage").value = prefs.storage;
 $("storage").onchange = (e) => { prefs.storage = e.target.value; save(); };
 

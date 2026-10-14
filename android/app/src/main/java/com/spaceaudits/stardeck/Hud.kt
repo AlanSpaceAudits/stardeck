@@ -33,7 +33,13 @@ object LiveStats {
 }
 
 /** File name in the official app's style: Unix epoch seconds plus the extension. */
-fun epochName(utcMillis: Long, ext: String) = "${utcMillis / 1000}.$ext"
+fun epochName(utcMillis: Long, ext: String) =
+    Labels.current.trim().replace(Regex("[^A-Za-z0-9_-]+"), "_").let { if (it.isEmpty()) "" else "${it}_" } + "${utcMillis / 1000}.$ext"
+
+/** Optional name put in front of saved file names and on the HUD, for targets the catalogue does not know. */
+object Labels {
+    var current by mutableStateOf("")
+}
 
 /** The data block shown on the HUD and burned into saved frames and recordings. */
 fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
@@ -45,7 +51,8 @@ fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
     val reticle = if (Reticle.label && sized) listOf(
         "Reticle ${formatArcsec(Reticle.sizeArcsec)}" + (dec?.let { "  crossing %.2f s".format(Locale.US, crossingSeconds(Reticle.sizeArcsec, it)) } ?: ""),
     ) else emptyList()
-    return reticle + listOf(
+    val label = Labels.current.trim().takeIf { it.isNotEmpty() }?.let { listOf("Target $it") } ?: emptyList()
+    return label + reticle + listOf(
         "Az ${v("az")}  El ${v("alt")}",
         if (fix != null) "Lat ${fmtDeg(fix.latitude, Prefs.dms, digits = 5)}  Lon ${fmtDeg(fix.longitude, Prefs.dms, digits = 5)}" else "Lat --  Lon --",
         utcFormat("yyyy-MM-dd HH:mm:ss.SSS").format(Date(gps.utcMillis())) + " UTC" + fps,

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -66,6 +67,10 @@ fun StorageMenu(onChange: () -> Unit) {
                 )
             }
             HorizontalDivider()
+            androidx.compose.material3.OutlinedTextField(
+                Labels.current, { Labels.current = it; onChange() }, Modifier.padding(horizontal = 12.dp), singleLine = true,
+                label = { Text("Label (file names and HUD)") },
+            )
             DropdownMenuItem(
                 { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(Storage.raw, null); Text("RAW video on the Seestar") } },
                 { Storage.raw = !Storage.raw; onChange() },
@@ -141,5 +146,61 @@ fun FloatingCard(title: String, onClose: () -> Unit, modifier: Modifier = Modifi
             Text("✕", color = Color.White, fontSize = 18.sp, modifier = Modifier.clickable(onClick = onClose).padding(4.dp))
         }
         content()
+    }
+}
+
+/**
+ * Mount backlash, as on the official app's hidden beta settings page: read and set through the mount
+ * pass-through. Alt-az mode uses :GBZR/:GBZD (read) and :SBZR/:SBZD (set); EQ mode :GBGR/:GBGD and :SBGR/:SBGD.
+ * Values are shown as the mount reports them.
+ */
+@Composable
+fun BacklashPanel(link: Link) {
+    var eq by remember { mutableStateOf(false) }
+    var r by remember { mutableStateOf("--") }
+    var d by remember { mutableStateOf("--") }
+    var newR by remember { mutableStateOf("") }
+    var newD by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf<Pair<Boolean, Int>?>(null) }
+    var note by remember { mutableStateOf("") }
+    fun read() {
+        link.request("get_device_state", org.json.JSONObject().put("keys", org.json.JSONArray().put("mount"))) { m ->
+            val isEq = m?.optJSONObject("result")?.optJSONObject("mount")?.optBoolean("equ_mode") ?: false
+            eq = isEq
+            val g = if (isEq) "G" else "Z"
+            link.request("scope_send_cmd", org.json.JSONArray().put(":GB${g}R#").put("#")) { a -> r = a?.optString("result")?.trimEnd('#') ?: "--" }
+            link.request("scope_send_cmd", org.json.JSONArray().put(":GB${g}D#").put("#")) { a -> d = a?.optString("result")?.trimEnd('#') ?: "--" }
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(link.connected) { if (link.connected) read() }
+    Column {
+        Text("Mode: ${if (eq) "equatorial" else "alt-az"}")
+        Text("R axis: $r     D axis: $d", fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.OutlinedTextField(newR, { newR = it }, Modifier.width(110.dp), singleLine = true, label = { Text("new R") })
+            androidx.compose.material3.TextButton({ newR.toIntOrNull()?.let { confirm = true to it } }) { Text("Set R") }
+            androidx.compose.material3.OutlinedTextField(newD, { newD = it }, Modifier.width(110.dp), singleLine = true, label = { Text("new D") })
+            androidx.compose.material3.TextButton({ newD.toIntOrNull()?.let { confirm = false to it } }) { Text("Set D") }
+        }
+        androidx.compose.material3.TextButton({ read() }) { Text("Read again") }
+        if (note.isNotEmpty()) Text(note)
+    }
+    confirm?.let { (axisR, value) ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text("Change backlash?") },
+            text = { Text("Set the ${if (axisR) "R" else "D"} axis backlash to $value. The current value is ${if (axisR) r else d}; write it down to go back.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton({
+                    val cmd = ":SB${if (eq) "G" else "Z"}${if (axisR) "R" else "D"}$value#"
+                    link.request("scope_send_cmd", org.json.JSONObject().put("cmd", cmd).put("resp", 1).put("ret_obj", 1)) { a ->
+                        note = if (a?.optInt("code", -1) == 0) "set" else "not set: ${a?.optString("error")}"
+                        read()
+                    }
+                    confirm = null
+                }) { Text("Set") }
+            },
+            dismissButton = { androidx.compose.material3.TextButton({ confirm = null }) { Text("Cancel") } },
+        )
     }
 }

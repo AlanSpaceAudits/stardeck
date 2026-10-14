@@ -300,6 +300,8 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var zoom by remember { mutableIntStateOf(0) }
     var showFocusCard by remember { mutableStateOf(false) }
     var showReticle by remember { mutableStateOf(false) }
+    var showCustomTarget by remember { mutableStateOf(false) }
+    var showBacklash by remember { mutableStateOf(false) }
     var recordStart by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var host by remember { mutableStateOf("SeeStar.local") }
@@ -323,6 +325,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         Reticle.label = appPrefs.getBoolean("reticle_label", true)
         Storage.target = appPrefs.getInt("storage", Storage.BOTH)
         Storage.raw = appPrefs.getBoolean("storage_raw", false)
+        Labels.current = appPrefs.getString("label", "") ?: ""
     }
     var wideCam by remember { mutableStateOf(false) }
     // star frames come on 4800 from the telescope camera and on 4804 from the wide-angle camera
@@ -620,7 +623,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                StarMenu(link, catalog, site) { gps.utcMillis() }
+                StarMenu(link, catalog, site, { gps.utcMillis() }) { showCustomTarget = true }
                 OverlayButton("Scenery") { link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }
                 SolarMenu(link, site) { gps.utcMillis() }
                 OverlayButton("Stop view") { link.send("iscope_stop_view", JSONObject()) }
@@ -628,6 +631,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 OverlayButton("Park") { link.send("scope_park") }
                 OverlayButton("Exposure") { showAdjust = !showAdjust }
                 OverlayButton("Focus") { showFocusCard = !showFocusCard }
+                val heaterOn = link.setting?.optBoolean("heater_enable") ?: false
+                OverlayButton(if (heaterOn) "Dew heater: on" else "Dew heater: off") {
+                    link.send("pi_output_set2", JSONObject().put("heater", JSONObject().put("state", !heaterOn).put("value", 90)))
+                }
                 OverlayButton("Reticle") { showReticle = !showReticle }
                 if (link.hasWideCamera) OverlayButton(if (wideCam) "Camera: wide" else "Camera: telescope") {
                     wideCam = !wideCam
@@ -648,7 +655,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                         else -> selectingTrack = !selectingTrack
                     }
                 }
-                StorageMenu { appPrefs.edit().putInt("storage", Storage.target).putBoolean("storage_raw", Storage.raw).apply() }
+                StorageMenu { appPrefs.edit().putInt("storage", Storage.target).putBoolean("storage_raw", Storage.raw).putString("label", Labels.current).apply() }
                 if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
                 OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
             }
@@ -661,6 +668,28 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         if (showReticle) FloatingCard("Reticle", { showReticle = false }, Modifier.align(Alignment.Center).width(340.dp)) {
             val fov = arcsecPerVideoPx?.let { a -> (player?.player as? ExoPlayer)?.videoSize?.takeIf { it.width > 0 }?.let { (it.width * a) to (it.height * a) } }
             ReticlePanel(arcsecPerVideoPx, fov, link.pointing?.optDouble("dec")?.takeIf { !it.isNaN() }, { gps.utcMillis() }) { saveReticle() }
+        }
+        if (showCustomTarget) FloatingCard("Custom target", { showCustomTarget = false }, Modifier.align(Alignment.Center).width(330.dp)) {
+            var name by remember { mutableStateOf(Labels.current) }
+            var ra by remember { mutableStateOf("") }
+            var dec by remember { mutableStateOf("") }
+            var j2000 by remember { mutableStateOf(true) }
+            OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("Name") })
+            OutlinedTextField(ra, { ra = it }, singleLine = true, label = { Text("RA, hours (5.5 or 5 30 00)") })
+            OutlinedTextField(dec, { dec = it }, singleLine = true, label = { Text("Dec, degrees (-5.4 or -5 23 28)") })
+            Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(j2000, { j2000 = it }); Text("J2000 (catalogue) coordinates", color = Color.White) }
+            Text("The name also labels saved files and the HUD.", color = Color.White, fontSize = 12.sp)
+            Button({
+                val raH = parseSexagesimal(ra)
+                val decD = parseSexagesimal(dec)
+                if (raH != null && decD != null && name.isNotBlank()) {
+                    val (r2, d2) = if (j2000) precessFromJ2000(raH, decD, julianDateNow()) else raH to decD
+                    Labels.current = name.trim()
+                    appPrefs.edit().putString("label", Labels.current).apply()
+                    starGoto(link, name.trim(), r2, d2)
+                    showCustomTarget = false
+                } else note = "enter a name, RA and Dec"
+            }) { Text("Go") }
         }
         if (showFocusCard) FloatingCard("Focus", { showFocusCard = false }, Modifier.align(Alignment.Center).width(320.dp)) { FocusPanel(link) }
 
@@ -814,6 +843,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 Section("Mosaic", showMosaic, { showMosaic = it }) { MosaicPanel(link, catalog) }
                 Section("Calibration", showCalib, { showCalib = it }) { CalibrationPanel(link) }
                 Section("Versions", showVersion, { showVersion = it }) { VersionPanel(link) }
+                Section("Mount backlash", showBacklash, { showBacklash = it }) { BacklashPanel(link) }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
