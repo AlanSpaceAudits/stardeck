@@ -24,6 +24,8 @@ data class FrameHeader(
     val id: Int,
     val width: Int,
     val height: Int,
+    /** stacked-image number, used to ask for its annotation */
+    val imageId: Int = 0,
 ) {
     companion object {
         const val LEN = 80
@@ -36,7 +38,7 @@ data class FrameHeader(
             require(u16(0) == MAGIC) { "bad frame magic 0x%04x".format(u16(0)) }
             val length = (u8(6) shl 24) or (u8(7) shl 16) or (u8(8) shl 8) or u8(9)
             require(length >= 0) { "negative frame length" }
-            return FrameHeader(length, u8(12) != 0, u8(13), u8(14), u8(15), u16(16), u16(18))
+            return FrameHeader(length, u8(12) != 0, u8(13), u8(14), u8(15), u16(16), u16(18), u16(28))
         }
     }
 }
@@ -161,6 +163,8 @@ class ImageStreamClient(private val port: Int = 4800) {
     var frame by mutableStateOf<Bitmap?>(null)
     /** img_type of [frame]: 1 preview, 4 JPEG, 5 stacked. */
     var frameType by mutableStateOf(0)
+    /** image id of [frame] (header bytes 28-29) */
+    var frameId by mutableStateOf(0)
     var info by mutableStateOf("")
     var status by mutableStateOf("not connected")
     var connected by mutableStateOf(false)
@@ -208,6 +212,7 @@ class ImageStreamClient(private val port: Int = 4800) {
                         if (gen != generation) break
                         frame = bmp
                         frameType = h.imgType
+                        frameId = h.imageId
                         info = d.info
                     } catch (e: NoImageException) {
                         status = e.message ?: "no image"

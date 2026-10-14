@@ -1,5 +1,6 @@
 package com.spaceaudits.stardeck
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,7 +24,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -44,14 +53,48 @@ fun rememberImageStream(link: Link, port: Int = 4800): ImageStreamClient {
     return stream
 }
 
-/** The newest frame from the image channel, fitted inside `modifier`. */
+/** One object the scope found in a stacked image, in that image's pixels. */
+class Annotation(val x: Float, val y: Float, val radius: Float, val name: String)
+
+/** Annotations from `get_annotate_result` and the image size they refer to; null when the scope has none (yet). */
+fun parseAnnotations(reply: JSONObject?): Pair<Pair<Int, Int>, List<Annotation>>? {
+    val r = reply?.takeIf { it.optInt("code", -1) == 0 }?.optJSONObject("result") ?: return null
+    val size = r.optJSONArray("image_size")?.takeIf { it.length() >= 2 } ?: return null
+    val items = r.optJSONArray("annotations") ?: return null
+    val list = (0 until items.length()).mapNotNull { i ->
+        val a = items.optJSONObject(i) ?: return@mapNotNull null
+        val names = a.optJSONArray("names")?.let { n -> (0 until n.length()).map { n.optString(it) } }.orEmpty().filter { it.isNotBlank() }
+        Annotation(a.optDouble("pixelx").toFloat(), a.optDouble("pixely").toFloat(), a.optDouble("radius", 0.0).toFloat(),
+            names.joinToString(" / ").ifEmpty { a.optString("name") })
+    }
+    return (size.optInt(0) to size.optInt(1)) to list
+}
+
+/** The newest frame from the image channel, fitted inside `modifier`, with annotation circles and names. */
 @Composable
-fun StarImage(stream: ImageStreamClient, modifier: Modifier) {
+fun StarImage(stream: ImageStreamClient, modifier: Modifier, flipH: Boolean = false, flipV: Boolean = false,
+              notes: Pair<Pair<Int, Int>, List<Annotation>>? = null) {
     val frame = stream.frame
     Box(modifier, contentAlignment = Alignment.Center) {
         if (frame != null) {
             val image = remember(frame) { frame.asImageBitmap() }
-            Image(image, stream.info, Modifier.matchParentSize(), contentScale = ContentScale.Fit)
+            Image(image, stream.info, Modifier.matchParentSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f),
+                contentScale = ContentScale.Fit)
+            val measurer = rememberTextMeasurer()
+            if (notes != null) Canvas(Modifier.matchParentSize()) {
+                val (iw, ih) = notes.first
+                if (iw <= 0 || ih <= 0) return@Canvas
+                val k = minOf(size.width / iw, size.height / ih)
+                val (ox, oy) = (size.width - iw * k) / 2 to (size.height - ih * k) / 2
+                val gold = Color(0xFFFFD54F)
+                for (a in notes.second) {
+                    val x = ox + (if (flipH) iw - a.x else a.x) * k
+                    val y = oy + (if (flipV) ih - a.y else a.y) * k
+                    val r = (a.radius * k).coerceAtLeast(6f)
+                    drawCircle(gold, r, Offset(x, y), style = Stroke(2f))
+                    drawText(measurer, a.name, Offset(x + r * 0.75f, y + r * 0.75f), TextStyle(color = gold, fontSize = 12.sp))
+                }
+            }
         }
     }
 }

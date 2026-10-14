@@ -18,6 +18,7 @@ class ImageStreamTest {
             b[13] = imgType.toByte(); b[14] = dataType.toByte(); b[15] = id.toByte()
             b[16] = (w shr 8).toByte(); b[17] = w.toByte()
             b[18] = (h shr 8).toByte(); b[19] = h.toByte()
+            b[28] = 0x01; b[29] = 0x2C
         }
 
     private fun le16(vararg v: Int) = ByteArray(v.size * 2).also { b ->
@@ -27,7 +28,7 @@ class ImageStreamTest {
     @Test
     fun headerParse() {
         val h = FrameHeader.parse(header(8, 1, 0, 2, 2, 2))
-        assertEquals(FrameHeader(8, false, 1, 0, 2, 2, 2), h)
+        assertEquals(FrameHeader(8, false, 1, 0, 2, 2, 2, 300), h)
         val big = FrameHeader.parse(header(1920 * 1080 * 2, 1, 3, 2, 1080, 1920, bigEndian = true))
         assertEquals(1920 * 1080 * 2, big.length)
         assertEquals(1080 to 1920, big.width to big.height)
@@ -100,5 +101,18 @@ class ImageStreamTest {
     @Test
     fun unknownLayoutFails() {
         assertThrows(IllegalArgumentException::class.java) { decode(FrameHeader(6, false, 1, 0, 2, 2, 2), ByteArray(6)) }
+    }
+
+    @Test
+    fun annotations() {
+        val reply = org.json.JSONObject("""{"code":0,"result":{"image_id":300,"image_size":[1080,1920],"annotations":[
+            {"type":"ngc","pixelx":540.5,"pixely":960,"radius":40,"name":"NGC 224","names":["NGC 224","M 31"]},
+            {"type":"star","pixelx":10,"pixely":20,"radius":0,"name":"HD 1234"}]}}""")
+        val (size, list) = parseAnnotations(reply)!!
+        assertEquals(1080 to 1920, size)
+        assertEquals("NGC 224 / M 31", list[0].name)
+        assertEquals(540.5f, list[0].x)
+        assertEquals("HD 1234", list[1].name)
+        assertEquals(null, parseAnnotations(org.json.JSONObject("""{"code":207,"error":"annotating"}""")))
     }
 }

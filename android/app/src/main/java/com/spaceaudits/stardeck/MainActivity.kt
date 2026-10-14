@@ -332,6 +332,22 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     val stream = rememberImageStream(link, if (wideCam) 4804 else 4800)
     var showStar by remember { mutableStateOf(false) }
     LaunchedEffect(stream.frame != null) { if (stream.frame != null) showStar = true }
+    // the scope names the objects in each stacked image once it has plate-solved it
+    var annotate by remember { mutableStateOf(false) }
+    var notes by remember { mutableStateOf<Pair<Pair<Int, Int>, List<Annotation>>?>(null) }
+    var annotateNote by remember { mutableStateOf("") }
+    LaunchedEffect(annotate, stream.frameId, stream.frameType) {
+        if (!annotate || stream.frameType != 5 || stream.frameId <= 0) return@LaunchedEffect
+        link.request("get_annotate_result", JSONObject().put("img_id", stream.frameId)) { r ->
+            val parsed = parseAnnotations(r)
+            if (parsed != null) notes = parsed
+            annotateNote = when {
+                r?.optInt("code", -1) != 0 -> "annotating…"
+                parsed == null || parsed.second.isEmpty() -> "no objects found"
+                else -> ""
+            }
+        }
+    }
     var showFocus by remember { mutableStateOf(false) }
     var showStack by remember { mutableStateOf(false) }
     var showDevice by remember { mutableStateOf(false) }
@@ -547,7 +563,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         // The picture's own rectangle (video fitted to the screen), so the crosshair and the HUD block sit
         // inside the frame exactly where recordings and snapshots burn them in.
         val starFrame = stream.frame?.takeIf { showStar }
-        if (starFrame != null) StarImage(stream, Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f))
+        if (starFrame != null) StarImage(stream, Modifier.fillMaxSize(), flipH, flipV, notes.takeIf { annotate })
         val aspect = when {
             starFrame != null -> starFrame.width.toFloat() / starFrame.height
             // the decoder's picture size; the view itself fills the screen before the first frame
@@ -657,6 +673,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 }
                 StorageMenu { appPrefs.edit().putInt("storage", Storage.target).putBoolean("storage_raw", Storage.raw).putString("label", Labels.current).apply() }
                 if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
+                if (showStar && stream.frameType == 5) OverlayButton(if (annotate) "Hide names${annotateNote.let { if (it.isEmpty()) "" else " ($it)" }}" else "Annotate") { annotate = !annotate }
                 OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
             }
         }
