@@ -534,7 +534,8 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(Modifier.background(Color(0x55000000), RoundedCornerShape(18.dp)).padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            // while a recording or time-lapse runs only the stop button stays
+            if (!recording && !lapseRunning) Row(Modifier.background(Color(0x55000000), RoundedCornerShape(18.dp)).padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 listOf("Time-lapse", "Photo", "Video").forEachIndexed { i, label ->
                     Box(
                         Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(14.dp))
