@@ -149,11 +149,10 @@ fun StackPanel(link: Link, stream: ImageStreamClient, gps: Gps, hud: Boolean) {
 
         Button({
             val frame = stream.frame ?: run { note = "no image to save"; return@Button }
-            val prefix = if (stream.frameType == 5) "stack_" else "star_"
             val lines = if (hud) hudLines(link.pointing, gps) else null
             scope.launch {
                 note = runCatching {
-                    withContext(Dispatchers.IO) { "saved " + savePng(context, burnHud(frame, false, false, lines), prefix, gps.utcMillis()) }
+                    withContext(Dispatchers.IO) { "saved " + savePng(context, burnHud(frame, false, false, lines), gps.utcMillis()) }
                 }.getOrElse { "save failed: ${it.message}" }
             }
         }, enabled = stream.frame != null) { Text(if (hud) "Save image with HUD" else "Save image") }

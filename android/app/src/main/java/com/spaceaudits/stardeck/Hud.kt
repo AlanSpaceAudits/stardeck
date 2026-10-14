@@ -27,15 +27,23 @@ object Prefs {
     var dms by mutableStateOf(false)
 }
 
+/** Measured frames per second of the picture on screen; null when unknown. */
+object LiveStats {
+    var fps by mutableStateOf<Double?>(null)
+}
+
+/** File name in the official app's style: Unix epoch seconds plus the extension. */
+fun epochName(utcMillis: Long, ext: String) = "${utcMillis / 1000}.$ext"
+
 /** The data block shown on the HUD and burned into saved frames and recordings. */
 fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
     fun v(k: String) = pointing?.optDouble(k)?.takeIf { !it.isNaN() }?.let { fmtDeg(it, Prefs.dms, signed = k == "alt") } ?: "--"
     val fix = gps.fix
-    val locked = gps.locked()
+    val fps = LiveStats.fps?.let { "  %.1f fps".format(Locale.US, it) } ?: ""
     return listOf(
         "Az ${v("az")}  El ${v("alt")}",
-        if (fix != null) "Lat ${fmtDeg(fix.latitude, Prefs.dms, digits = 5)}  Lon ${fmtDeg(fix.longitude, Prefs.dms, digits = 5)}  ±%.0f m".format(Locale.US, fix.accuracy) else "Lat --  Lon --",
-        utcFormat("yyyy-MM-dd HH:mm:ss.SSS").format(Date(gps.utcMillis())) + if (locked) " UTC (GPS)" else " UTC (phone clock)",
+        if (fix != null) "Lat ${fmtDeg(fix.latitude, Prefs.dms, digits = 5)}  Lon ${fmtDeg(fix.longitude, Prefs.dms, digits = 5)}" else "Lat --  Lon --",
+        utcFormat("yyyy-MM-dd HH:mm:ss.SSS").format(Date(gps.utcMillis())) + " UTC" + fps,
     )
 }
 
@@ -62,8 +70,8 @@ fun burnHud(frame: Bitmap, flipH: Boolean, flipV: Boolean, lines: List<String>?)
 }
 
 /** Saves into Pictures/StarDeck; returns the file name. */
-fun savePng(context: Context, bitmap: Bitmap, prefix: String, utcMillis: Long): String {
-    val name = prefix + utcFormat("yyyyMMdd_HHmmss_SSS").format(Date(utcMillis)) + ".png"
+fun savePng(context: Context, bitmap: Bitmap, utcMillis: Long): String {
+    val name = epochName(utcMillis, "png")
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, name)
         put(MediaStore.Images.Media.MIME_TYPE, "image/png")

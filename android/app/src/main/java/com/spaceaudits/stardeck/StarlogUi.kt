@@ -64,7 +64,7 @@ class StarlogState {
 
     fun start(context: Context, utcMillis: Long) {
         val cat = catalog ?: return
-        val name = "starlog_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(utcMillis)) + ".csv"
+        val name = epochName(utcMillis, "csv")
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, "text/csv")

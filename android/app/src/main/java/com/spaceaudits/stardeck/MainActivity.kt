@@ -283,6 +283,8 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var joystickOn by remember { mutableStateOf(true) }
     var sheetOpen by remember { mutableStateOf(false) }
     var showAdjust by remember { mutableStateOf(false) }
+    val appPrefs = remember { context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE) }
+    var controlsOpen by remember { mutableStateOf(appPrefs.getBoolean("controls_open", false)) }
     val stream = rememberImageStream(link)
     var showStar by remember { mutableStateOf(false) }
     LaunchedEffect(stream.frame != null) { if (stream.frame != null) showStar = true }
@@ -337,11 +339,25 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
     }
     LaunchedEffect(Unit) { if (!link.connected) link.connect(host.trim()) }
+    LaunchedEffect(Unit) {
+        var last = -1
+        var lastAt = System.nanoTime()
+        while (true) {
+            delay(1000)
+            val counters = (player?.player as? ExoPlayer)?.videoDecoderCounters
+            counters?.ensureUpdated()
+            val now = System.nanoTime()
+            val rendered = counters?.renderedOutputBufferCount
+            LiveStats.fps = if (rendered != null && last >= 0 && rendered >= last) (rendered - last) / ((now - lastAt) / 1e9) else null
+            last = rendered ?: -1
+            lastAt = now
+        }
+    }
 
-    fun snapshot(prefix: String): String? {
+    fun snapshot(): String? {
         val frame = (player?.videoSurfaceView as? TextureView)?.bitmap ?: return null
         val lines = if (hud) hudLines(link.pointing, gps) else null
-        return savePng(context, burnHud(frame, flipH, flipV, lines), prefix, gps.utcMillis())
+        return savePng(context, burnHud(frame, flipH, flipV, lines), gps.utcMillis())
     }
 
     // App-side interval capture: one frame every interval, HUD burned in when it is on.
@@ -352,7 +368,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         val start = System.currentTimeMillis()
         lapseSaved = 0
         while (minutes <= 0 || System.currentTimeMillis() - start < minutes * 60000) {
-            runCatching { snapshot("lapse_") }.onSuccess { if (it != null) lapseSaved++ }.onFailure { note = "timelapse: ${it.message}" }
+            runCatching { snapshot() }.onSuccess { if (it != null) lapseSaved++ }.onFailure { note = "timelapse: ${it.message}" }
             delay(interval)
         }
         lapseRunning = false
@@ -411,8 +427,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             note = "recording on the scope only: no video on the phone"
             return
         }
-        val name = "stardeck_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
-            .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(gps.utcMillis())) + ".mp4"
+        val name = epochName(gps.utcMillis(), "mp4")
         runCatching { HudRecorder(context, view.width, view.height, 15, name) }
             .onSuccess { recorder = it; note = "recording on the scope and Movies/StarDeck/$name" }
             .onFailure { note = "recording on the scope only; phone copy failed: ${it.message}" }
@@ -434,7 +449,9 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         if (starFrame != null) StarImage(stream, Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f))
         val aspect = when {
             starFrame != null -> starFrame.width.toFloat() / starFrame.height
-            else -> (player?.videoSurfaceView as? TextureView)?.takeIf { it.width > 0 && it.height > 0 }?.let { it.width.toFloat() / it.height } ?: (9f / 16f)
+            // the decoder's picture size; the view itself fills the screen before the first frame
+            else -> (player?.player as? ExoPlayer)?.videoSize?.takeIf { it.width > 0 && it.height > 0 }
+                ?.let { it.width * it.pixelWidthHeightRatio / it.height } ?: (9f / 16f)
         }
         if (hud && screenSize.width > 0) {
             val density = androidx.compose.ui.platform.LocalDensity.current
@@ -482,21 +499,27 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             }
         }
 
-        // right-hand action column
+        // right-hand controls, folded into one button so they stay out of the picture
         Column(
             Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 84.dp, end = 8.dp),
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            StarMenu(link, catalog, site) { gps.utcMillis() }
-            OverlayButton("Scenery") { link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }
-            SolarMenu(link, site) { gps.utcMillis() }
-            OverlayButton("Stop view") { link.send("iscope_stop_view", JSONObject()) }
-            OverlayButton("Open") { link.send("scope_move_to_horizon") }
-            OverlayButton("Park") { link.send("scope_park") }
-            OverlayButton("Exposure") { showAdjust = !showAdjust }
-            if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
-            OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
+            OverlayButton(if (controlsOpen) "Controls ▴" else "Controls ▾") {
+                controlsOpen = !controlsOpen
+                appPrefs.edit().putBoolean("controls_open", controlsOpen).apply()
+            }
+            if (controlsOpen) {
+                StarMenu(link, catalog, site) { gps.utcMillis() }
+                OverlayButton("Scenery") { link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }
+                SolarMenu(link, site) { gps.utcMillis() }
+                OverlayButton("Stop view") { link.send("iscope_stop_view", JSONObject()) }
+                OverlayButton("Open") { link.send("scope_move_to_horizon") }
+                OverlayButton("Park") { link.send("scope_park") }
+                OverlayButton("Exposure") { showAdjust = !showAdjust }
+                if (stream.frame != null) OverlayButton(if (showStar) "Show video" else "Star image") { showStar = !showStar }
+                OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
+            }
         }
 
         if (joystickOn) {
@@ -528,7 +551,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                             1 -> {
                                 // full-resolution original in the scope album, HUD copy on the phone
                                 link.send("save_image")
-                                note = runCatching { snapshot("snap_")?.let { "saved on the scope and Pictures/StarDeck/$it" } ?: "saved on the scope" }
+                                note = runCatching { snapshot()?.let { "saved on the scope and Pictures/StarDeck/$it" } ?: "saved on the scope" }
                                     .getOrElse { "saved on the scope; phone copy failed: ${it.message}" }
                             }
                             else -> toggleRecording()
@@ -682,7 +705,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
 @Composable
 fun OverlayButton(label: String, onClick: () -> Unit) {
     Box(
-        Modifier.background(Color(0x99000000), RoundedCornerShape(16.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
+        Modifier.background(Color(0x55000000), RoundedCornerShape(16.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
     ) { Text(label, color = Color.White, fontSize = 13.sp) }
 }
 

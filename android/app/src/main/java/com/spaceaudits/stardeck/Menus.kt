@@ -43,7 +43,7 @@ private fun altText(alt: Double?) = alt?.let { "  alt %.0f°".format(it) } ?: ""
 fun StarMenu(link: Link, catalog: Catalog, site: Pair<Double, Double>?, utcMillis: () -> Long) {
     var open by remember { mutableStateOf(false) }
     Box {
-        Button({ open = true }) { Text("Star") }
+        OverlayButton("Star ▾") { open = true }
         DropdownMenu(open, { open = false }) {
             DropdownMenuItem({ Text("Star view at the current position") }, {
                 link.send("iscope_start_view", JSONObject().put("mode", "star"))
@@ -76,7 +76,7 @@ fun SolarMenu(link: Link, site: Pair<Double, Double>?, utcMillis: () -> Long) {
     var open by remember { mutableStateOf(false) }
     var filterOn by remember { mutableStateOf(false) }
     Box {
-        Button({ open = true }) { Text("Solar") }
+        OverlayButton("Solar ▾") { open = true }
         DropdownMenu(open, { open = false }) {
             DropdownMenuItem({ Text("Solar view at the current position") }, {
                 link.send("iscope_start_view", JSONObject().put("mode", "solar_sys"))
