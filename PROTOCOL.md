@@ -147,3 +147,39 @@ From the decompiled app 3.3.0; not yet checked live. Class names are the evidenc
 | Compass | `start_compass_calibration`, `stop_compass_calibration` (kit sends no params; the older `CompassCalibrationStopCmd` sends `{"force":0}`), `get_compass_state` result `{number}` | `BaseDeviceViewModel.startCompassSensor`, `stopCompassSensor`, `CompassResult` |
 | Level sensor | `start_gsensor_calibration` | `BaseDeviceViewModel.startSensorCalibration` |
 | Versions | `get_device_state` key `device`: `firmware_ver_int`, `firmware_ver_string`, `svr_ver_int`, `svr_ver_string`, `ios_ver`, `firmware_platform`. Update prompt when `firmware_ver_int < 2846` ("8.46"), forced below 2626; only for the master client (`client.is_master` not false) | `SeestarDevice`, `DeviceStateData.getNeedFwUpgrade`, `getNeedForceFwUpgrade`, `getFwNeedUpdateVersion`, `ZConfig.firmwareAuthenticationChange` |
+
+## Bluetooth LE
+
+From the decompiled app 3.3.0; not yet checked live. BLE runs in Java/Kotlin on RxAndroidBle (`com.polidea.rxandroidble2`, with its own Dagger under `bleshadow`); no native library takes part. Main classes: `BleUtilsV2` (discovery, connect, band, country), `BleUtils` (log download), `BtParseInfo` (advertisement parse), `BleWifiData` (connect result), `NearbyDiscoveryDelegate`, `DeviceDiscoveryConnectDialog`, `ConnectDialog`.
+
+Advertisement and GATT:
+
+- Scan filter: service UUID `850e1701-6ecf-49f1-a13f-f5c2d9174f9f`, low-latency mode, results with an empty name dropped (`BleUtilsV2.startScan`). The log download also filters on the device name (`BleUtils.downLoadBleFile`).
+- Advertised name = the hotspot SSID: the NFC flow matches the BLE name against the `ssid` in the tag URL `https://app.zwoastro.com/Seestar/NFC?ssid=...` (`NearbyDiscoveryDelegate`, `ConnectViewDelegate`).
+- Manufacturer-specific field (AD type 0xFF), read whole as text, company id bytes included: `S30`, `S50`, `S30P` (S30 Pro), `S50P` (S50 Pro), `S30P1` (S30 Pro, eclipse sub-model); anything else is treated as S50 (`BtParseInfo`, `DeviceDiscoveryConnectDialog$connectBle$1$onModel$1`).
+
+| Characteristic | Use | Evidence |
+|---|---|---|
+| `850e1702-6ecf-49f1-a13f-f5c2d9174f9f` | Command: the app writes requests and receives replies as notifications on the same characteristic | `BleUtilsV2.connectBle`, `changeWifiFreq`, `changeWifiCountry`, `BleUtils.downLoadBleFile` |
+| `850e1703-6ecf-49f1-a13f-f5c2d9174f9f` | Read: JSON with `code`; the reader polls every 200 ms for up to 15 s while `code` is 1000. Defined in `BleUtils` and `BleUtilsV2.readCharacteristic`; no caller found in 3.3.0 | `readCharacteristic` |
+
+Session order (`BleUtilsV2.connectBle`): connect (retry after 500 ms), request MTU 500 (515 for the log download), enable notifications on 1702, wait 80 ms, write `ble_connect`.
+
+Message format: plain UTF-8 JSON, one object per write and per notification. No encryption, no signature, no framing. Every request carries `ble_sn` (a random UUID made once per app install, `SeestarApplication`, `PreferenceHelper2.getDeviceId`) and `ble_method`. Replies carry `ble_method`, `code` (0 = ok), and `result` or `error`.
+
+| Operation | Request | Reply | Evidence |
+|---|---|---|---|
+| Connect, read hotspot | `{"ble_sn","ble_method":"ble_connect","nfc_trig":bool,"wifi_country":"US"}`. `nfc_trig` is true when the flow started from an NFC tag; `wifi_country` is the app setting, `""` when not set | code 0: `result {ssid, pwd, sn, cpuid, model, submodel, bssid, serc, freq ("2.4G"/"5G"), fw_version, is_bridge}`. code 1003: the user must press RESET on the base of the scope; the app shows a 60 s countdown and waits for a second `ble_connect` reply. code 1008: RESET timeout. Other: error | `BleUtilsV2.connectBle$...$lambda$38`, `BleWifiData`, string `connect_device_bt_confirm_tip`, `DeviceDiscoveryConnectDialog$connectBle$1$onReset$1` |
+| Activation check | `{"ble_sn","ble_method":"send_to_air_reply","ble_data":{"id":"1","method":"pi_is_verified"}}`, sent right after a code-0 `ble_connect` | `result {method:"pi_is_verified", result:bool}`. code 1011: the scope's main process did not answer | same |
+| Activation | When not verified, the app posts sn, cpuid, model, submodel and phone location to the ZWO server (`SeestarActivationBody`), then relays the signed answer: `ble_data {"id":14,"method":"pi_encrypt","params":[{"sn","cpuId","auth_code","digest","sign"}]}` | `result {method:"pi_encrypt", code:0, result:0}` on success. The server error 900006 is shown separately | `BleUtilsV2.requestActive`, `connectBle$...$lambda$32` |
+| Hotspot band | `{"ble_sn","ble_method":"set_wifi_frequency","value":"2.4G"}` or `"5G"` | code 0: `result {freq, is_bridge}`; else `result` is the error text | `BleUtilsV2.changeWifiFreq`, `DeviceDiscoveryConnectDialog$ConnectGuideViewDelegate$changeWifi$1` |
+| Wi-Fi country | `{"ble_sn","ble_method":"set_wifi_country","value":"<app country code>"}`, sent from the connect-guide page | reply not read beyond `ble_method` | `BleUtilsV2.changeWifiCountry` |
+| Log download | `{"ble_sn","ble_method":"get_log_size"}`, then `{"ble_sn","ble_method":"start_log_download"}` | `get_log_size`: `result {log_size}`. After the `start_log_download` reply, every notification is raw log bytes until `log_size` bytes have arrived | `BleUtils.downLoadBleFile`, `UploadLogPageViewModel` |
+
+After the BLE phase the app joins the hotspot with `ssid` and `pwd` from `ble_connect` (`ConnectViewModel.connectWifi`, `DeviceDiscoveryConnectDialog$connectWifi$2$1`). On a failed join it shows the SSID and password to the user and offers the band switch.
+
+Runtime permissions (`NearbyDiscoveryDelegate`): `BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT` on Android 12 and later, `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` before that. The manifest declares `BLUETOOTH_SCAN` with `neverForLocation`, and `BLUETOOTH` / `BLUETOOTH_ADMIN` with `maxSdkVersion 30`.
+
+Not found over BLE in 3.3.0: setting the station (home) Wi-Fi, wake or power-on, reading the hotspot without `ble_connect`, changing the hotspot SSID or password, and any JSON-RPC relayed through `send_to_air_reply` other than `pi_is_verified` and `pi_encrypt`. Not confirmed: whether the scope remembers a `ble_sn` after RESET and skips the 1003 step on the next connect, and the GATT write type (the app uses the characteristic's default).
+
+StarDeck: `Ble.kt` (`BleScanner`, `BleClient`, message builders and parsers), `BlePanel.kt`. StarDeck does not do the server activation.
