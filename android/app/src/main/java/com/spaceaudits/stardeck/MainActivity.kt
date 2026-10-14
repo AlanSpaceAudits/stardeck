@@ -108,6 +108,8 @@ class Link(private val keyPem: String) {
     var stackSettings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var scopeLocation by mutableStateOf("")
     var battery by mutableStateOf("")
+    /** the scope has a second (wide-angle) camera, as the S30 does */
+    var hasWideCamera by mutableStateOf(false)
     /** latitude, east longitude stored in the scope */
     var scopeLatLon by mutableStateOf<Pair<Double, Double>?>(null)
     /** balance_sensor and compass_sensor, refreshed quickly while the level display is open */
@@ -162,11 +164,12 @@ class Link(private val keyPem: String) {
                         if (refresh || System.currentTimeMillis() - lastSettings > 15000) {
                             refresh = false
                             lastSettings = System.currentTimeMillis()
-                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status"))).optJSONObject("result") ?: JSONObject()
+                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status").put("second_camera"))).optJSONObject("result") ?: JSONObject()
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
                             this@Link.setting = setting
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
+                            hasWideCamera = state.optJSONObject("second_camera") != null
                             state.optJSONObject("pi_status")?.let { battery = "${it.optInt("battery_capacity")}%" + if (it.optBoolean("charge_online")) " ⚡" else "" }
                             val here = state.optJSONArray("location_lon_lat")
                             scopeLocation = here?.let { "lat %.4f, lon %.4f".format(it.optDouble(1), it.optDouble(0)) } ?: ""
@@ -296,7 +299,9 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         Storage.target = appPrefs.getInt("storage", Storage.BOTH)
         Storage.raw = appPrefs.getBoolean("storage_raw", false)
     }
-    val stream = rememberImageStream(link)
+    var wideCam by remember { mutableStateOf(false) }
+    // star frames come on 4800 from the telescope camera and on 4804 from the wide-angle camera
+    val stream = rememberImageStream(link, if (wideCam) 4804 else 4800)
     var showStar by remember { mutableStateOf(false) }
     LaunchedEffect(stream.frame != null) { if (stream.frame != null) showStar = true }
     var showFocus by remember { mutableStateOf(false) }
@@ -472,7 +477,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     Box(Modifier.fillMaxSize().background(Color.Black).onSizeChanged { screenSize = it }) {
         val ip = link.ip
         if (ip != null) {
-            Video("rtsp://$ip:4554/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
+            Video("rtsp://$ip:${if (wideCam) 4555 else 4554}/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
         } else {
             Text(link.status, Modifier.align(Alignment.Center).padding(24.dp), color = Color.White)
         }
@@ -571,6 +576,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 OverlayButton("Park") { link.send("scope_park") }
                 OverlayButton("Exposure") { showAdjust = !showAdjust }
                 OverlayButton("Focus") { showFocusCard = !showFocusCard }
+                if (link.hasWideCamera) OverlayButton(if (wideCam) "Camera: wide" else "Camera: telescope") {
+                    wideCam = !wideCam
+                    link.send("set_setting", JSONObject().put("selected_cam", if (wideCam) "SecondView" else "View"))
+                }
                 // the scope does not report rtsp_roi_index back, so the app keeps it
                 OverlayButton("Zoom ${listOf(1, 2, 4)[zoom]}x") {
                     zoom = (zoom + 1) % 3
