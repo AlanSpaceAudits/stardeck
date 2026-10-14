@@ -24,3 +24,7 @@ socket2 = { version = "0.6.5", features = ["all"] }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
+
+# btleplug on Linux talks to BlueZ over D-Bus; built from source so the portable build needs no libdbus headers
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }

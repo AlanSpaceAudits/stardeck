@@ -33,8 +33,17 @@ struct Shared {
     slewing: bool,
     /// the level display is open and wants fresh sensor readings
     level_open: bool,
-    /// HUD data block, crosshair, flip H, flip V as the UI has them; read by the video thread
-    overlay: (bool, bool, bool, bool),
+    /// HUD data block, flip H, flip V as the UI has them; read by the video thread
+    overlay: (bool, bool, bool),
+    reticle: reticle::Reticle,
+    /// video zoom step (rtsp_roi_index); the scope does not report it back
+    zoom: usize,
+    /// the wide camera is selected; its pixel scale is unknown
+    wide: bool,
+    /// frames shown per second, measured by the UI
+    fps: Option<f64>,
+    /// IPv4 address the control connection reached (the name, or the hotspot gateway in the field)
+    addr: Option<String>,
     /// file for a HUD recording that starts with the next video frame
     hud_rec_path: Option<std::path::PathBuf>,
     hud_rec: Option<stream::HudRecorder>,
@@ -49,10 +58,37 @@ impl Shared {
     }
 }
 
+/// Sky angle of one pixel of a frame `frame_width` wide: the camera's own pixel scale, times sensor
+/// pixels per frame pixel, divided by the zoom for video (the zoomed video shows the centre of the sensor).
+fn arcsec_per_frame_px(device: &Value, frame_width: usize, zoom: usize, video: bool) -> Option<f64> {
+    let pixel_um = device["camera"]["pixel_size_um"].as_f64().filter(|v| *v > 0.0)?;
+    let focal_mm = device["device"]["focal_len"].as_f64().filter(|v| *v > 0.0)?;
+    let chip = device["camera"]["chip_size"][0].as_f64().filter(|v| *v > 0.0)?;
+    let z = if video { reticle::ZOOMS[zoom.min(2)] } else { 1.0 };
+    (frame_width > 0).then(|| reticle::arcsec_per_pixel(pixel_um, focal_mm) * chip / frame_width as f64 / z)
+}
+
+/// Reticle primitives for a frame of `w` × `h` pixels (a video frame when `video`).
+fn reticle_prims(s: &Shared, w: usize, h: usize, video: bool) -> Vec<reticle::Prim> {
+    let scale = if s.wide { None } else { arcsec_per_frame_px(&s.device, w, s.zoom, video) };
+    s.reticle.shapes(w as f32, h as f32, scale.map(|a| 1.0 / a))
+}
+
+/// Frames from the RTSP video (scenery and solar views), as opposed to the star-mode image channel.
+fn is_video(f: &stream::Frame) -> bool {
+    f.info.starts_with("video")
+}
+
+/// File name in the official app's style: Unix epoch seconds plus the extension.
+fn epoch_name(ext: &str) -> String {
+    format!("{}.{ext}", chrono::Utc::now().timestamp())
+}
+
 /// The data block shown on the HUD and burned into saved frames.
 fn hud_lines(s: &Shared) -> Vec<String> {
     let here = &s.device["location_lon_lat"];
-    vec![
+    let fps = s.fps.map_or(String::new(), |f| format!("  {f:.1} fps"));
+    s.reticle.hud_line(s.ra_dec.map(|(_, dec)| dec)).into_iter().chain([
         format!(
             "Az {}  El {}",
             s.alt_az.map_or("--".into(), |(_, az)| format!("{az:.4}°")),
@@ -63,8 +99,9 @@ fn hud_lines(s: &Shared) -> Vec<String> {
             here[1].as_f64().map_or("--".into(), |v| format!("{v:.5}°")),
             here[0].as_f64().map_or("--".into(), |v| format!("{v:.5}°"))
         ),
-        format!("{} UTC", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f")),
-    ]
+        format!("{} UTC{fps}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f")),
+    ])
+    .collect()
 }
 
 struct Cmd {
@@ -144,14 +181,16 @@ fn worker(host: String, rx: mpsc::Receiver<Cmd>, shared: Arc<Mutex<Shared>>, ctx
         ctx.request_repaint();
     };
     set(&|s| s.status = format!("connecting to {host}"));
-    let mut scope = match proto::Scope::connect(&host) {
-        Ok(s) => s,
+    let (mut scope, addr, via_gateway) = match connect_scope(&host) {
+        Ok(v) => v,
         Err(e) => return set(&|s| s.status = format!("connect failed: {e}")),
     };
     set(&|s| {
         s.connected = true;
-        s.status = format!("connected to {host}");
+        s.addr = Some(addr.clone());
+        s.status = if via_gateway { format!("connected to {addr} (Wi-Fi gateway; {host} did not answer)") } else { format!("connected to {host}") };
     });
+    let host = addr;
     // The scope has no battery-backed clock; goto and tracking need the current time.
     {
         use chrono::{Datelike, Timelike};
@@ -206,8 +245,28 @@ fn worker(host: String, rx: mpsc::Receiver<Cmd>, shared: Arc<Mutex<Shared>>, ctx
     stop.store(true, Ordering::Relaxed);
     set(&|s| {
         s.connected = false;
+        s.addr = None;
         s.status = err.clone();
     });
+}
+
+/// Connects to `host`; when it does not answer, tries the gateway of the PC's Wi-Fi: on the Seestar's
+/// hotspot that is the scope. Returns the connection, the IPv4 address reached, and whether it was a gateway.
+fn connect_scope(host: &str) -> proto::Res<(proto::Scope, String, bool)> {
+    let direct = proto::resolve(host, proto::CONTROL_PORT).and_then(|a| {
+        let ip = a.ip().to_string();
+        proto::Scope::connect(&ip).map(|s| (s, ip, false))
+    });
+    let err = match direct {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    for gw in field::gateway_candidates() {
+        if let Ok(s) = proto::Scope::connect(&gw.to_string()) {
+            return Ok((s, gw.to_string(), true));
+        }
+    }
+    Err(err)
 }
 
 /// Level display: tilt at the outer ring, and the tilt shown as good.
@@ -299,7 +358,35 @@ struct App {
     search: String,
     show_level: bool,
     hud: bool,
-    crosshair: bool,
+    reticle: reticle::Reticle,
+    /// custom reticle size as typed, and its unit (arcminutes when set, else arcseconds)
+    reticle_custom: String,
+    reticle_arcmin: bool,
+    /// stopwatch start (Unix ms) and the measured crossings, newest first
+    timer_started: Option<i64>,
+    laps: Vec<reticle::Lap>,
+    /// video zoom step: 0, 1, 2 for 1x, 2x, 4x
+    zoom: usize,
+    planet_centre: bool,
+    /// drawing a box for object tracking: start and current pointer position
+    track_select: bool,
+    track_drag: Option<(egui::Pos2, egui::Pos2)>,
+    tracking_object: bool,
+    storage: Storage,
+    /// the Seestar records RAW video instead of mp4
+    storage_raw: bool,
+    /// the scope's own recording (start_record_avi) is running since then
+    scope_rec: Option<Instant>,
+    /// frames shown since `fps_since`
+    fps_frames: u32,
+    fps_since: Instant,
+    /// hotspot credentials, remembered from the scope (get_device_state `ap`) or from Bluetooth
+    ap_ssid: String,
+    ap_password: String,
+    ble: Arc<Mutex<ble::BleState>>,
+    ble_tx: Option<tokio::sync::mpsc::UnboundedSender<ble::BleCmd>>,
+    /// per-install id sent as `ble_sn`
+    ble_client_id: String,
     flip_h: bool,
     flip_v: bool,
     /// on-screen rectangle of the view, for cropping HUD screenshots
@@ -320,6 +407,34 @@ struct App {
     starlog_height_m: f64,
 }
 
+/// Where photos and videos are kept.
+#[derive(Clone, Copy, PartialEq)]
+enum Storage {
+    Both,
+    Seestar,
+    Pc,
+}
+
+impl Storage {
+    const ALL: [(Storage, &'static str); 3] = [(Storage::Both, "Seestar and PC"), (Storage::Seestar, "Seestar only"), (Storage::Pc, "PC only")];
+
+    fn on_seestar(self) -> bool {
+        self != Storage::Pc
+    }
+
+    fn on_pc(self) -> bool {
+        self != Storage::Seestar
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn from_index(i: u64) -> Storage {
+        Storage::ALL.get(i as usize).map_or(Storage::Both, |s| s.0)
+    }
+}
+
 /// App-side interval capture: saves a frame (with the HUD burned in when it is on) every interval.
 struct Timelapse {
     dir: std::path::PathBuf,
@@ -338,14 +453,104 @@ impl App {
 
 impl App {
     /// Saves the newest frame as PNG, flipped as displayed, with the HUD burned in when `lines` is given.
+    /// The reticle is drawn in whenever it is on.
     fn save_png(&self, path: &std::path::Path, lines: Option<&[String]>) -> Result<(), String> {
         let f = self.last_frame.as_ref().ok_or("no frame to save")?;
         let mut rgba = f.rgba.clone();
         hud::flip(&mut rgba, f.width, f.height, self.flip_h, self.flip_v);
+        let prims = reticle_prims(&self.shared.lock().unwrap(), f.width, f.height, is_video(f));
+        hud::burn_reticle(&mut rgba, f.width, f.height, &prims);
         if let Some(lines) = lines {
-            hud::burn(&mut rgba, f.width, f.height, lines, self.crosshair);
+            hud::burn_text(&mut rgba, f.width, f.height, lines);
         }
         image::save_buffer(path, &rgba, f.width as u32, f.height as u32, image::ColorType::Rgba8).map_err(|e| e.to_string())
+    }
+
+    /// Address of the scope: the one the control connection reached, else the host as typed.
+    fn scope_host(&self) -> String {
+        self.shared.lock().unwrap().addr.clone().unwrap_or_else(|| self.host.trim().to_owned())
+    }
+
+    /// The PC makes a HUD copy when it keeps files, or when the Seestar does and the HUD is on.
+    fn hud_copy_needed(&self) -> bool {
+        self.storage.on_pc() || (self.storage.on_seestar() && self.hud)
+    }
+
+    /// The Seestar cannot draw the HUD itself: when it is a storage target and the HUD is on, the PC's
+    /// HUD copy goes to MyWorks/StarDeck on its share; with "Seestar only" the PC copy is then removed.
+    fn deliver(&self, path: std::path::PathBuf) {
+        if !(self.storage.on_seestar() && self.hud) {
+            return;
+        }
+        let Some(ip) = self.shared.lock().unwrap().addr.clone() else {
+            self.shared.lock().unwrap().frame_info = "HUD copy to the Seestar: not connected; kept on the PC".into();
+            return;
+        };
+        let (keep, shared) = (self.storage.on_pc(), self.shared.clone());
+        std::thread::spawn(move || {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let copied = std::fs::read(&path).map_err(Into::into).and_then(|data| share::upload(&ip, &name, &data));
+            let msg = match copied {
+                Ok(()) if keep => format!("HUD copy {name} on the Seestar (MyWorks\\StarDeck) and in {}", path.display()),
+                Ok(()) => match std::fs::remove_file(&path) {
+                    Ok(()) => format!("HUD copy {name} on the Seestar (MyWorks\\StarDeck)"),
+                    Err(e) => format!("HUD copy {name} on the Seestar; PC copy not removed: {e}"),
+                },
+                Err(e) => format!("HUD copy to the Seestar failed: {e}; kept {}", path.display()),
+            };
+            shared.lock().unwrap().frame_info = msg;
+        });
+    }
+
+    /// Photo: the full-size original in the Seestar album and the HUD copy on the PC, per the Storage choice.
+    fn photo(&mut self, lines: &[String]) {
+        if self.storage.on_seestar() {
+            self.send("save_image", None);
+        }
+        let mut msg = if self.storage.on_seestar() { "saved on the Seestar".to_string() } else { String::new() };
+        if self.hud_copy_needed() {
+            let saved = self.out_path(&epoch_name("png")).map_err(|e| e.to_string()).and_then(|path| self.save_png(&path, self.hud.then_some(lines)).map(|()| path));
+            match saved {
+                Ok(path) => {
+                    if self.storage.on_pc() {
+                        msg = format!("{}{}", if msg.is_empty() { "saved " } else { "saved on the Seestar and " }, path.display());
+                    }
+                    self.deliver(path);
+                }
+                Err(e) => msg = format!("{msg}{}HUD copy failed: {e}", if msg.is_empty() { "" } else { "; " }),
+            }
+        }
+        self.shared.lock().unwrap().frame_info = msg;
+    }
+
+    /// Video: the Seestar records the full-size original (start_record_avi), the PC records the HUD copy.
+    fn toggle_recording(&mut self, ctx: &egui::Context) {
+        if self.recording.is_some() || self.scope_rec.is_some() {
+            if self.scope_rec.take().is_some() {
+                self.send("stop_record_avi", None);
+            }
+            let file = self.recording.as_ref().map(|(f, _)| f.clone());
+            if file.is_some() {
+                // closes the file and keeps the video running
+                self.start_video(ctx, false);
+            }
+            let mut msg = if self.storage.on_seestar() { "saved on the Seestar".to_string() } else { String::new() };
+            if let Some(file) = file {
+                if self.storage.on_pc() {
+                    msg = format!("{}{}", if msg.is_empty() { "saved " } else { "saved on the Seestar and " }, file.display());
+                }
+                self.deliver(file);
+            }
+            self.shared.lock().unwrap().frame_info = msg;
+            return;
+        }
+        if self.storage.on_seestar() {
+            self.send("start_record_avi", Some(json!({"raw": self.storage_raw, "timelapse": {"enable": false, "delay_sec": 0, "src_dura_min": 0}})));
+            self.scope_rec = Some(Instant::now());
+        }
+        if self.hud_copy_needed() {
+            self.start_video(ctx, true);
+        }
     }
 
     /// Path for a new file in the save folder; makes the folder.
@@ -357,9 +562,13 @@ impl App {
 
     fn settings(&self) -> Value {
         json!({
-            "save_dir": self.save_dir, "ui_scale": self.ui_scale, "hud": self.hud, "crosshair": self.crosshair,
+            "save_dir": self.save_dir, "ui_scale": self.ui_scale, "hud": self.hud,
             "flip_h": self.flip_h, "flip_v": self.flip_v, "starlog_radius": self.starlog_radius, "starlog_mag": self.starlog_mag,
             "temp_c": self.starlog_temp_c, "pressure_mb": self.starlog_pressure_mb, "height_m": self.starlog_height_m,
+            "reticle_shape": self.reticle.shape.index(), "reticle_arcsec": self.reticle.size_arcsec,
+            "reticle_rings": self.reticle.rings, "reticle_label": self.reticle.label,
+            "storage": self.storage.index(), "storage_raw": self.storage_raw,
+            "ap_ssid": self.ap_ssid, "ap_password": self.ap_password, "ble_client_id": self.ble_client_id,
         })
     }
 
@@ -402,11 +611,12 @@ impl App {
                         }
                     }
                     if s.hud_rec.is_some() {
-                        let (hud_on, crosshair, flip_h, flip_v) = s.overlay;
+                        let (hud_on, flip_h, flip_v) = s.overlay;
                         let mut rgba = frame.rgba.clone();
                         hud::flip(&mut rgba, frame.width, frame.height, flip_h, flip_v);
+                        hud::burn_reticle(&mut rgba, frame.width, frame.height, &reticle_prims(&s, frame.width, frame.height, true));
                         if hud_on {
-                            hud::burn(&mut rgba, frame.width, frame.height, &hud_lines(&s), crosshair);
+                            hud::burn_text(&mut rgba, frame.width, frame.height, &hud_lines(&s));
                         }
                         if !s.hud_rec.as_mut().is_some_and(|r| r.write(&rgba)) {
                             s.hud_rec = None;
@@ -423,8 +633,8 @@ impl App {
         // With it off, ffmpeg copies the scope's stream unchanged (full size).
         let hud_recording = record && self.hud;
         let started = (|| -> proto::Res<_> {
-            let file = if record { Some(self.out_path(&chrono::Local::now().format("stardeck_%Y%m%d_%H%M%S.mp4").to_string())?) } else { None };
-            let addr = proto::resolve(&self.host, port)?;
+            let file = if record { Some(self.out_path(&epoch_name("mp4"))?) } else { None };
+            let addr = proto::resolve(&self.scope_host(), port)?;
             let copy_to = if hud_recording { None } else { file.as_deref() };
             let child = stream::spawn_video(&format!("rtsp://{addr}/stream"), copy_to, on_frame)?;
             if hud_recording {
@@ -467,7 +677,7 @@ impl App {
                 ctx.request_repaint();
             };
             // ponytail: connects on the UI thread (blocks up to 5 s if the scope is unreachable)
-            match stream::spawn(&self.host, port, on_frame) {
+            match stream::spawn(&self.scope_host(), port, on_frame) {
                 Ok(tx) => self.img_tx = Some(tx),
                 Err(e) => return self.shared.lock().unwrap().frame_info = format!("image channel: {e}"),
             }
@@ -483,17 +693,31 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let shared = self.shared.clone();
         let mut s = shared.lock().unwrap();
-        s.overlay = (self.hud, self.crosshair, self.flip_h, self.flip_v);
+        s.overlay = (self.hud, self.flip_h, self.flip_v);
+        (s.reticle, s.zoom, s.wide) = (self.reticle, self.zoom, self.wide);
         if let Some(f) = s.frame.take() {
             let img = egui::ColorImage::from_rgba_unmultiplied([f.width, f.height], &f.rgba);
             self.texture = Some(ctx.load_texture("frame", img, Default::default()));
             self.last_frame = Some(f);
+            self.fps_frames += 1;
+        }
+        // frames shown per second, over windows of about a second; unknown when frames stop
+        let window = self.fps_since.elapsed().as_secs_f64();
+        if window >= 1.0 {
+            s.fps = (self.fps_frames > 0).then(|| self.fps_frames as f64 / window);
+            (self.fps_frames, self.fps_since) = (0, Instant::now());
+        }
+        // remember the hotspot credentials whenever the scope reports them
+        if let Some(ssid) = s.device["ap"]["ssid"].as_str().filter(|v| !v.is_empty()) {
+            ssid.clone_into(&mut self.ap_ssid);
+            s.device["ap"]["passwd"].as_str().unwrap_or("").clone_into(&mut self.ap_password);
         }
         let mut image_cmd = None;
-        let mut save_frame = None;
         let lines = hud_lines(&s);
         let mut out: Vec<(&str, Option<Value>)> = Vec::new();
         let mut held_angle = None;
+        let mut ble_cmd = None;
+        let mut take_photo = false;
         let mut toggle_video = std::mem::take(&mut self.auto_video);
         let mut toggle_record = std::mem::take(&mut self.auto_record);
         // ffmpeg left by itself (no stream in star mode, connection lost)
@@ -674,7 +898,7 @@ impl eframe::App for App {
                     self.starlog = match self.starlog.take() {
                         Some(_) => None,
                         None => self
-                            .out_path(&chrono::Local::now().format("starlog_%Y%m%d_%H%M%S.csv").to_string())
+                            .out_path(&epoch_name("csv"))
                             .and_then(starlog::Log::create)
                             .map_err(|e| s.frame_info = format!("starlog: {e}"))
                             .ok(),
@@ -755,6 +979,65 @@ impl eframe::App for App {
             });
             ui.label(format!("step {} / {max}", step.map_or("--".into(), |v| v.to_string())));
 
+            section(ui, "Field");
+            if self.ap_ssid.is_empty() {
+                ui.small("Scope hotspot: not read yet (connect once, or use Bluetooth below).");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("hotspot  {}\npassword {}", self.ap_ssid, self.ap_password));
+                    if ui.small_button("Copy").on_hover_text("Copies the password").clicked() {
+                        ctx.copy_text(self.ap_password.clone());
+                    }
+                });
+            }
+            ui.small("Away from home, join this hotspot in the PC's Wi-Fi settings and press Connect: when the host name does not answer, the app tries the Wi-Fi gateway, which is the scope.");
+            {
+                let mut b = self.ble.lock().unwrap();
+                ui.horizontal(|ui| {
+                    let label = if b.scanning { "Scanning…" } else { "Bluetooth scan" };
+                    if ui.add_enabled(!b.scanning && b.connected_to.is_none(), egui::Button::new(label)).on_hover_text("Finds Seestars nearby over Bluetooth LE.").clicked() {
+                        b.status = "starting Bluetooth…".into();
+                        ble_cmd = Some(ble::BleCmd::Scan);
+                    }
+                    if b.scanning && ui.button("Stop").clicked() {
+                        ble_cmd = Some(ble::BleCmd::StopScan);
+                    }
+                });
+                for scope in b.scopes.clone() {
+                    ui.horizontal(|ui| {
+                        let model = ble::model_name(&scope.model).unwrap_or(&scope.model);
+                        let rssi = scope.rssi.map_or(String::new(), |r| format!("  {r} dBm"));
+                        ui.label(egui::RichText::new(format!("{}  {model}{rssi}\n{}", scope.name, scope.address)).small());
+                        let idle = b.connected_to.is_none();
+                        if ui.add_enabled(idle, egui::Button::new("Read hotspot")).on_hover_text("Connects over Bluetooth and reads the hotspot name and password (ble_connect).").clicked() {
+                            ble_cmd = Some(ble::BleCmd::Connect(scope.address.clone()));
+                        }
+                    });
+                }
+                if let Some(w) = b.wifi.take() {
+                    // hand the credentials over once; they stay in the Field lines above
+                    if !w.ssid.is_empty() {
+                        (self.ap_ssid, self.ap_password) = (w.ssid.clone(), w.password.clone());
+                    }
+                    b.status = format!(
+                        "hotspot {}  band {}{}\nsn {}  {} {}{}",
+                        w.ssid,
+                        if w.band.is_empty() { "--" } else { &w.band },
+                        if w.bridge == Some(true) { "  bridge" } else { "" },
+                        w.sn,
+                        w.model,
+                        w.submodel,
+                        w.firmware.map_or(String::new(), |f| format!("  firmware {f}"))
+                    );
+                }
+                if b.reset_prompt {
+                    ui.label(egui::RichText::new("Press the RESET button on the base of the scope to confirm.").strong());
+                }
+                if !b.status.is_empty() {
+                    ui.small(&b.status);
+                }
+            }
+
             ui.add_space(10.0);
             egui::CollapsingHeader::new("Device info").show(ui, |ui| {
                 ui.monospace(serde_json::to_string_pretty(&s.device).unwrap_or_default());
@@ -775,24 +1058,38 @@ impl eframe::App for App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    let label = match &self.recording {
-                        Some((_, since)) => format!("Stop  {:02}:{:02}", since.elapsed().as_secs() / 60, since.elapsed().as_secs() % 60),
-                        None => "Record".into(),
+                    let since = self.scope_rec.or(self.recording.as_ref().map(|r| r.1));
+                    let label = match since {
+                        Some(since) => format!("Stop  {:02}:{:02}", since.elapsed().as_secs() / 60, since.elapsed().as_secs() % 60),
+                        None => "Video".into(),
                     };
-                    let outline = if self.recording.is_some() { egui::Stroke::new(1.5, RED) } else { egui::Stroke::NONE };
-                    let button = egui::Button::new(egui::RichText::new(label).color(RED)).selected(self.recording.is_some()).stroke(outline);
-                    if ui.add(button).on_hover_text("Records the scenery or solar video to an mp4 file in the folder.").clicked() {
+                    let outline = if since.is_some() { egui::Stroke::new(1.5, RED) } else { egui::Stroke::NONE };
+                    let button = egui::Button::new(egui::RichText::new(label).color(RED)).selected(since.is_some()).stroke(outline);
+                    if ui.add(button).on_hover_text("Records video: the full-size original on the Seestar, the HUD copy (mp4) on the PC, per the Storage choice.").clicked() {
                         toggle_record = true;
                     }
-                    if ui.button("Picture").on_hover_text("Saves the view as a PNG file.").clicked() {
-                        save_frame = Some(false);
+                    if ui.button("Photo").on_hover_text("Saves a picture: the full-size original on the Seestar, the HUD copy (PNG) on the PC, per the Storage choice.").clicked() {
+                        take_photo = true;
                     }
-                    if ui.button("with HUD").on_hover_text("Saves the view as a PNG file with the data block burned in.").clicked() {
-                        save_frame = Some(true);
-                    }
+                });
+                ui.horizontal(|ui| {
+                    let storage_label = Storage::ALL[self.storage.index()].1;
+                    egui::ComboBox::from_id_salt("storage").selected_text(format!("Storage: {storage_label}")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show_ui(ui, |ui| {
+                        for (value, label) in Storage::ALL {
+                            ui.radio_value(&mut self.storage, value, label);
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.storage_raw, "RAW video on the Seestar");
+                        ui.small("The Seestar keeps its full-size picture, and the HUD copy goes to MyWorks\\StarDeck on the Seestar. The PC keeps a HUD copy when it is a storage target.");
+                    });
                 });
                 if let Some((file, _)) = &self.recording {
                     ui.small(file.display().to_string());
+                }
+                if self.scope_rec.is_some() {
+                    ui.small(if self.storage_raw { "recording RAW on the Seestar" } else { "recording on the Seestar" });
+                }
+                if self.recording.is_some() || self.scope_rec.is_some() {
                     ctx.request_repaint_after(Duration::from_secs(1));
                 }
 
@@ -845,6 +1142,20 @@ impl eframe::App for App {
                 if let Some(now) = s.device["setting"]["isp_exp_ms"].as_f64() {
                     ui.small(format!("scope reports {now} ms"));
                 }
+                // auto exposure brightness bias, as the official adjust panel: ae_bri_percent = 50 + bias / 2
+                if let Some(percent) = s.device["setting"]["ae_bri_percent"].as_f64() {
+                    let mut bias = (percent - 50.0) * 2.0;
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::Slider::new(&mut bias, -100.0..=100.0).step_by(1.0).text("brightness"));
+                        if ui.small_button("Reset").clicked() {
+                            bias = 0.0;
+                            out.push(("set_setting", Some(json!({"ae_bri_percent": 50.0}))));
+                        } else if r.drag_stopped() || r.lost_focus() {
+                            out.push(("set_setting", Some(json!({"ae_bri_percent": 50.0 + bias / 2.0}))));
+                        }
+                    });
+                    s.device["setting"]["ae_bri_percent"] = json!(50.0 + bias / 2.0);
+                }
 
                 section(ui, "Timelapse");
                 ui.horizontal(|ui| {
@@ -859,7 +1170,7 @@ impl eframe::App for App {
                     if ui.button("Record on scope").clicked() {
                         let minutes = if self.lapse_minutes > 0.0 { self.lapse_minutes.round() as i64 } else { -1 };
                         let timelapse = json!({"enable": true, "delay_sec": self.lapse_interval_s.round().max(1.0) as i64, "src_dura_min": minutes});
-                        out.push(("start_record_avi", Some(json!({"raw": false, "timelapse": timelapse}))));
+                        out.push(("start_record_avi", Some(json!({"raw": self.storage_raw, "timelapse": timelapse}))));
                     }
                     if ui.button("Stop").clicked() {
                         out.push(("stop_record_avi", None));
@@ -912,6 +1223,76 @@ impl eframe::App for App {
                         }
                     }
                 });
+
+                section(ui, "Reticle");
+                ui.horizontal_wrapped(|ui| {
+                    for shape in reticle::Shape::ALL {
+                        ui.selectable_value(&mut self.reticle.shape, shape, shape.label());
+                    }
+                });
+                ui.label(format!("Size  {}", reticle::format_arcsec(self.reticle.size_arcsec)));
+                ui.horizontal_wrapped(|ui| {
+                    for a in reticle::PRESETS {
+                        ui.selectable_value(&mut self.reticle.size_arcsec, a, reticle::format_arcsec(a));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.reticle_custom).hint_text(if self.reticle_arcmin { "custom, ′" } else { "custom, ″" }).desired_width(80.0));
+                    ui.selectable_value(&mut self.reticle_arcmin, false, "″");
+                    ui.selectable_value(&mut self.reticle_arcmin, true, "′");
+                    if ui.button("Set").clicked() {
+                        if let Some(v) = self.reticle_custom.trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0) {
+                            self.reticle.size_arcsec = if self.reticle_arcmin { v * 60.0 } else { v };
+                        }
+                    }
+                });
+                ui.checkbox(&mut self.reticle.rings, "rings at 2× and 3×");
+                ui.checkbox(&mut self.reticle.label, "size and crossing time on the HUD");
+                // field of view of the picture shown, from the camera data and the zoom
+                let scale = self.last_frame.as_ref().filter(|_| !self.wide).and_then(|f| {
+                    arcsec_per_frame_px(&s.device, f.width, self.zoom, is_video(f)).map(|a| (a, f.width as f64 * a, f.height as f64 * a, is_video(f)))
+                });
+                let per_pixel = s.device["camera"]["pixel_size_um"].as_f64().zip(s.device["device"]["focal_len"].as_f64()).map(|(p, f)| reticle::arcsec_per_pixel(p, f));
+                match (scale, per_pixel) {
+                    (Some((_, fw, fh, video)), Some(pp)) => {
+                        let z = if video { reticle::ZOOMS[self.zoom] } else { 1.0 };
+                        ui.monospace(format!("Field {} × {}   {:.2}″ per pixel", reticle::format_arcsec(fw), reticle::format_arcsec(fh), pp / z));
+                    }
+                    _ if self.wide => {
+                        ui.small("The wide camera's scale is not known: the reticle is a plain crosshair.");
+                    }
+                    _ => {
+                        ui.small("Waiting for the camera's focal length and pixel size from the scope, and a picture.");
+                    }
+                }
+                let dec = s.ra_dec.map(|(_, d)| d);
+                let expected = dec.map(|d| reticle::crossing_seconds(self.reticle.size_arcsec, d));
+                if let (Some(d), Some(t)) = (dec, expected) {
+                    ui.small(format!("A star at Dec {d:+.3}° crosses {} in {t:.2} s (pointing held still)", reticle::format_arcsec(self.reticle.size_arcsec)));
+                }
+                // stopwatch
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                ui.horizontal(|ui| {
+                    let label = if self.timer_started.is_none() { "Start timing" } else { "Stop" };
+                    if ui.add(egui::Button::new(label).selected(self.timer_started.is_some())).clicked() {
+                        match self.timer_started.take() {
+                            None => self.timer_started = Some(now_ms),
+                            Some(start) => self.laps.insert(0, reticle::Lap { start_utc_ms: start, seconds: (now_ms - start) as f64 / 1000.0, size_arcsec: self.reticle.size_arcsec, expected }),
+                        }
+                    }
+                    if let Some(start) = self.timer_started {
+                        ui.monospace(egui::RichText::new(format!("{:.2} s", (now_ms - start) as f64 / 1000.0)).color(RED));
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                    if !self.laps.is_empty() && ui.button("Clear").clicked() {
+                        self.laps.clear();
+                    }
+                });
+                for lap in self.laps.iter().take(8) {
+                    let start = chrono::DateTime::from_timestamp_millis(lap.start_utc_ms).map_or(String::new(), |t| t.format("%H:%M:%S%.3f").to_string());
+                    let expected = lap.expected.map_or(String::new(), |e| format!("  (expected {e:.2} s)"));
+                    ui.monospace(egui::RichText::new(format!("{start} UTC  {:.2} s over {}{expected}", lap.seconds, reticle::format_arcsec(lap.size_arcsec))).small());
+                }
 
                 section(ui, "Starlog");
                 ui.horizontal(|ui| {
@@ -1054,12 +1435,12 @@ impl eframe::App for App {
                 }
                 egui::ComboBox::from_id_salt("display").selected_text("Display").close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show_ui(ui, |ui| {
                     ui.checkbox(&mut self.hud, "HUD data block");
-                    ui.checkbox(&mut self.crosshair, "crosshair");
                     ui.checkbox(&mut self.flip_h, "flip horizontal");
                     ui.checkbox(&mut self.flip_v, "flip vertical");
                     if ui.checkbox(&mut self.wide, "wide camera").changed() {
                         self.img_tx = None;
                     }
+                    ui.small("The reticle is set in the Reticle section.");
                     ui.separator();
                     ui.label("Star view colour");
                     ui.horizontal(|ui| {
@@ -1070,6 +1451,26 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(&mut s.knobs.gamma, 0.2..=1.5).text("gamma"));
                     ui.checkbox(&mut s.knobs.swap_rb, "swap R/B");
                 });
+                ui.separator();
+                // the scope does not report rtsp_roi_index back, so the app keeps it
+                if ui.button(format!("Zoom {}x", reticle::ZOOMS[self.zoom])).on_hover_text("Video zoom 1x, 2x, 4x: the centre of the sensor.").clicked() {
+                    self.zoom = (self.zoom + 1) % 3;
+                    out.push(("set_setting", Some(json!({"rtsp_roi_index": self.zoom}))));
+                }
+                if ui.button(if self.planet_centre { "Centre planet: on" } else { "Centre planet: off" }).on_hover_text("Keeps a planet in the centre of the solar view.").clicked() {
+                    self.planet_centre = !self.planet_centre;
+                    out.push(("set_setting", Some(json!({"planet_correction": self.planet_centre}))));
+                }
+                let track_label = if self.tracking_object { "Stop tracking" } else if self.track_select { "Cancel box" } else { "Track object" };
+                if ui.add(egui::Button::new(track_label).selected(self.track_select || self.tracking_object)).on_hover_text("Draw a box round an object in the video; the scope follows it.").clicked() {
+                    if self.tracking_object {
+                        self.tracking_object = false;
+                        out.push(("iscope_stop_view", Some(json!({"stage": "ObjectTrack"}))));
+                    } else {
+                        self.track_select = !self.track_select;
+                        self.track_drag = None;
+                    }
+                }
             });
             ui.label(egui::RichText::new(&s.frame_info).weak());
             // The picture keeps its proportions and sits in the middle of the space that is left.
@@ -1089,20 +1490,27 @@ impl eframe::App for App {
                 }
                 None => area,
             };
-            if self.hud || self.crosshair {
-                let r = self.view_rect;
-                let p = ui.painter_at(r);
-                let (c, arm, gap) = (r.center(), 40.0, 8.0);
-                let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 60, 60));
-                for d in [egui::vec2(1.0, 0.0), egui::vec2(-1.0, 0.0), egui::vec2(0.0, 1.0), egui::vec2(0.0, -1.0)] {
-                    if self.crosshair {
-                        p.line_segment([c + d * gap, c + d * arm], stroke);
+            // the reticle as it is burned into saved frames, scaled to the picture on screen
+            let r = self.view_rect;
+            let p = ui.painter_at(r);
+            let red = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 60, 60));
+            let (fw, fh, video) = self.last_frame.as_ref().map_or((r.width() as usize, r.height() as usize, true), |f| (f.width, f.height, is_video(f)));
+            let k = r.width() / fw.max(1) as f32;
+            let at = |x: f32, y: f32| r.min + egui::vec2(x, y) * k;
+            for prim in reticle_prims(&s, fw, fh, video) {
+                match prim {
+                    reticle::Prim::Line(x0, y0, x1, y1) => {
+                        p.line_segment([at(x0, y0), at(x1, y1)], red);
+                    }
+                    reticle::Prim::Circle(x, y, radius) => {
+                        p.circle_stroke(at(x, y), radius * k, red);
+                    }
+                    reticle::Prim::Rect(x, y, a, b) => {
+                        p.rect_stroke(egui::Rect::from_min_max(at(x - a, y - b), at(x + a, y + b)), 0.0, red, egui::StrokeKind::Middle);
                     }
                 }
             }
             if self.hud {
-                let r = self.view_rect;
-                let p = ui.painter_at(r);
                 let text = lines.join("\n");
                 let galley = p.layout_no_wrap(text, egui::FontId::monospace(14.0), egui::Color32::WHITE);
                 let pos = egui::pos2(r.left() + 8.0, r.bottom() - galley.size().y - 8.0);
@@ -1110,16 +1518,53 @@ impl eframe::App for App {
                 p.galley(pos, galley, egui::Color32::WHITE);
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+            // object tracking: a box dragged on the picture, sent in video pixels
+            if self.track_select {
+                let hint = p.layout_no_wrap("Draw a box round the object to track".into(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+                let pos = egui::pos2(r.center().x - hint.size().x / 2.0, r.top() + 12.0);
+                p.rect_filled(egui::Rect::from_min_size(pos, hint.size()).expand(6.0), 6.0, egui::Color32::from_black_alpha(160));
+                p.galley(pos, hint, egui::Color32::WHITE);
+                let resp = ui.interact(r, ui.id().with("track_box"), egui::Sense::drag());
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    if resp.drag_started() {
+                        self.track_drag = Some((pos, pos));
+                    } else if resp.dragged() {
+                        if let Some(d) = &mut self.track_drag {
+                            d.1 = pos;
+                        }
+                    }
+                }
+                if let Some((a, b)) = self.track_drag {
+                    p.rect_stroke(egui::Rect::from_two_pos(a, b), 0.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(79, 195, 247)), egui::StrokeKind::Middle);
+                }
+                if resp.drag_stopped() {
+                    if let (Some((a, b)), Some(f)) = (self.track_drag.take(), &self.last_frame) {
+                        // the PC shows the video at half size
+                        let (vw, vh) = if is_video(f) { (f.width as f64 * 2.0, f.height as f64 * 2.0) } else { (f.width as f64, f.height as f64) };
+                        let img = |p: egui::Pos2| {
+                            let (mut u, mut v) = (((p.x - r.left()) / r.width()) as f64, ((p.y - r.top()) / r.height()) as f64);
+                            if self.flip_h {
+                                u = 1.0 - u;
+                            }
+                            if self.flip_v {
+                                v = 1.0 - v;
+                            }
+                            (u.clamp(0.0, 1.0) * vw, v.clamp(0.0, 1.0) * vh)
+                        };
+                        let ((x1, y1), (x2, y2)) = (img(a), img(b));
+                        let (w, h) = ((x2 - x1).abs().round() as i64, (y2 - y1).abs().round() as i64);
+                        if w >= 8 && h >= 8 {
+                            out.push(("start_track_object", Some(json!({"x": x1.min(x2).round() as i64, "y": y1.min(y2).round() as i64, "width": w, "height": h}))));
+                            self.track_select = false;
+                            self.tracking_object = true;
+                        }
+                    }
+                }
+            }
         });
         drop(s);
-        if let Some(with_hud) = save_frame {
-            let name = chrono::Local::now().format(if with_hud { "seestar_hud_%Y%m%d_%H%M%S.png" } else { "seestar_%Y%m%d_%H%M%S.png" }).to_string();
-            let saved = self.out_path(&name).map_err(|e| e.to_string()).and_then(|path| self.save_png(&path, with_hud.then_some(&lines[..])).map(|()| path));
-            let msg = match saved {
-                Ok(path) => format!("saved {}", path.display()),
-                Err(e) => format!("save failed: {e}"),
-            };
-            self.shared.lock().unwrap().frame_info = msg;
+        if take_photo {
+            self.photo(&lines);
         }
         if let Some(l) = &mut self.lapse {
             let over = self.lapse_minutes > 0.0 && l.started.elapsed().as_secs_f64() > self.lapse_minutes * 60.0;
@@ -1136,7 +1581,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         if toggle_record {
-            self.start_video(&ctx, self.recording.is_none());
+            self.toggle_recording(&ctx);
         } else if toggle_video {
             if self.video.is_some() {
                 self.stop_video();
@@ -1177,6 +1622,14 @@ impl eframe::App for App {
         if let Some(m) = image_cmd {
             self.image_cmd(m, &ctx);
         }
+        if let Some(cmd) = ble_cmd {
+            let ble = self.ble.clone();
+            let tx = self.ble_tx.get_or_insert_with(|| {
+                let ctx = ctx.clone();
+                ble::spawn(self.ble_client_id.clone(), ble, move || ctx.request_repaint())
+            });
+            let _ = tx.send(cmd);
+        }
     }
 }
 
@@ -1189,6 +1642,10 @@ fn main() -> eframe::Result {
             let saved: Value = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
             let (num, flag) = (|key: &str, default: f64| saved[key].as_f64().unwrap_or(default), |key: &str, default: bool| saved[key].as_bool().unwrap_or(default));
             cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false); // the Size buttons own the zoom
+            // the default proportional font has no ′ and ″; Hack has them
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.families.entry(egui::FontFamily::Proportional).or_default().push("Hack".to_owned());
+            cc.egui_ctx.set_fonts(fonts);
             cc.egui_ctx.all_styles_mut(|style| {
                 style.spacing.item_spacing = egui::vec2(8.0, 6.0);
                 style.spacing.button_padding = egui::vec2(9.0, 4.0);
@@ -1231,7 +1688,36 @@ fn main() -> eframe::Result {
                 search: String::new(),
                 show_level: std::env::args().any(|a| a == "--level"),
                 hud: flag("hud", true),
-                crosshair: flag("crosshair", true),
+                reticle: reticle::Reticle {
+                    // settings from before the reticle: the crosshair switch maps to Cross or Off
+                    shape: match saved["reticle_shape"].as_u64() {
+                        Some(i) => reticle::Shape::from_index(i as usize),
+                        None if !flag("crosshair", true) => reticle::Shape::Off,
+                        None => reticle::Shape::Cross,
+                    },
+                    size_arcsec: num("reticle_arcsec", 600.0),
+                    rings: flag("reticle_rings", false),
+                    label: flag("reticle_label", true),
+                },
+                reticle_custom: String::new(),
+                reticle_arcmin: false,
+                timer_started: None,
+                laps: Vec::new(),
+                zoom: 0,
+                planet_centre: false,
+                track_select: false,
+                track_drag: None,
+                tracking_object: false,
+                storage: Storage::from_index(saved["storage"].as_u64().unwrap_or(0)),
+                storage_raw: flag("storage_raw", false),
+                scope_rec: None,
+                fps_frames: 0,
+                fps_since: Instant::now(),
+                ap_ssid: saved["ap_ssid"].as_str().unwrap_or("").to_owned(),
+                ap_password: saved["ap_password"].as_str().unwrap_or("").to_owned(),
+                ble: Default::default(),
+                ble_tx: None,
+                ble_client_id: saved["ble_client_id"].as_str().map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned),
                 flip_h: flag("flip_h", false),
                 flip_v: flag("flip_v", false),
                 view_rect: egui::Rect::NOTHING,
@@ -1261,4 +1747,97 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hud_lines_carry_reticle_and_fps() {
+        let mut s = Shared { fps: Some(14.96), ra_dec: Some((5.0, 0.0)), ..Default::default() };
+        s.reticle.shape = reticle::Shape::Circle;
+        let lines = hud_lines(&s);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "Reticle 10.00′  crossing 39.89 s");
+        assert!(lines[3].ends_with("UTC  15.0 fps"), "{}", lines[3]);
+        assert!(epoch_name("png").trim_end_matches(".png").parse::<i64>().is_ok());
+        // S50 camera data as the scope reports it; half-size video of the 1080-wide sensor
+        s.device = json!({"camera": {"chip_size": [1080, 1920], "pixel_size_um": 2.9}, "device": {"focal_len": 250.0}});
+        let a = arcsec_per_frame_px(&s.device, 540, 0, true).unwrap();
+        assert!((a - 4.785).abs() < 1e-2, "{a}");
+        assert!((arcsec_per_frame_px(&s.device, 540, 2, true).unwrap() - a / 4.0).abs() < 1e-9);
+        assert_eq!(arcsec_per_frame_px(&s.device, 540, 2, false), Some(a));
+        // 600″ circle at 4.785″ per pixel: radius about 62.7 px
+        match reticle_prims(&s, 540, 960, true)[..] {
+            [reticle::Prim::Circle(_, _, r)] => assert!((r - 62.7).abs() < 0.2, "{r}"),
+            ref p => panic!("{p:?}"),
+        }
+        s.wide = true;
+        assert_eq!(reticle_prims(&s, 540, 960, true).len(), 4, "no scale for the wide camera: crosshair");
+    }
+
+    /// Live: cargo test -- --ignored live_scope --nocapture
+    /// Starts a scenery view, takes one frame from the video, burns the reticle and HUD into an epoch-named PNG,
+    /// takes one photo (save_image) and a 3 s video (start/stop_record_avi) on the scope, copies the PNG to
+    /// MyWorks/StarDeck and deletes it again, then stops the view. Does not move the mount.
+    #[test]
+    #[ignore]
+    fn live_scope_photo_video_and_share() {
+        let host = std::env::var("SEESTAR_HOST").unwrap_or_else(|_| "SeeStar.local".into());
+        let (mut scope, addr, via) = connect_scope(&host).unwrap();
+        println!("connected to {addr} (gateway: {via})");
+        let device = scope.call("get_device_state", None).unwrap()["result"].clone();
+        println!("ap {}", device["ap"]);
+        assert!(device["ap"]["ssid"].as_str().is_some_and(|s| !s.is_empty()));
+        let ok = |r: Value| assert_eq!(r["code"], 0, "{r}");
+        ok(scope.call("iscope_start_view", Some(json!({"mode": "scenery"}))).unwrap());
+        std::thread::sleep(VIDEO_START_DELAY + Duration::from_secs(2));
+
+        let (tx, rx) = mpsc::channel();
+        let mut child = stream::spawn_video(&format!("rtsp://{addr}:4554/stream"), None, move |f| drop(tx.send(f))).unwrap();
+        let frame = loop {
+            let f = rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
+            if f.width > 0 {
+                break f;
+            }
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        println!("frame {}x{} {}", frame.width, frame.height, frame.info);
+
+        let mut s = Shared { device: device.clone(), ra_dec: Some((0.0, 30.0)), fps: Some(15.0), ..Default::default() };
+        s.reticle = reticle::Reticle { shape: reticle::Shape::CrossCircle, size_arcsec: 600.0, rings: true, label: true };
+        let prims = reticle_prims(&s, frame.width, frame.height, true);
+        assert_eq!(prims.len(), 7, "camera data gives the scale: {prims:?}");
+        let mut rgba = frame.rgba.clone();
+        hud::burn_reticle(&mut rgba, frame.width, frame.height, &prims);
+        hud::burn_text(&mut rgba, frame.width, frame.height, &hud_lines(&s));
+        let dir = std::env::temp_dir().join("stardeck_live_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = epoch_name("png");
+        let path = dir.join(&name);
+        image::save_buffer(&path, &rgba, frame.width as u32, frame.height as u32, image::ColorType::Rgba8).unwrap();
+        println!("HUD copy {}", path.display());
+
+        let r = scope.call("save_image", None).unwrap();
+        println!("save_image {r}");
+        ok(r);
+        let r = scope.call("start_record_avi", Some(json!({"raw": false, "timelapse": {"enable": false, "delay_sec": 0, "src_dura_min": 0}}))).unwrap();
+        println!("start_record_avi {r}");
+        ok(r);
+        std::thread::sleep(Duration::from_secs(3));
+        let r = scope.call("stop_record_avi", None).unwrap();
+        println!("stop_record_avi {r}");
+        ok(r);
+
+        share::upload(&addr, &name, &std::fs::read(&path).unwrap()).unwrap();
+        let listed = share::list(&addr).unwrap();
+        println!("on the share: {:?}", listed.iter().find(|(n, _)| *n == name));
+        assert!(listed.iter().any(|(n, size)| *n == name && *size == std::fs::metadata(&path).unwrap().len()));
+        share::delete(&addr, &name).unwrap();
+        assert!(!share::list(&addr).unwrap().iter().any(|(n, _)| *n == name));
+
+        ok(scope.call("iscope_stop_view", Some(json!({}))).unwrap());
+    }
 }

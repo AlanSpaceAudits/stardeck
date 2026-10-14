@@ -23,6 +23,7 @@ fn fill(rgba: &mut [u8], w: usize, h: usize, x0: i64, y0: i64, x1: i64, y1: i64,
 }
 
 /// Draws `lines` of text (bottom left) and, when `crosshair` is set, a centre crosshair into an RGBA frame.
+#[allow(dead_code)] // the app now draws the reticle with burn_reticle
 pub fn burn(rgba: &mut [u8], w: usize, h: usize, lines: &[String], crosshair: bool) {
     let (cx, cy) = (w as i64 / 2, h as i64 / 2);
     let (arm, gap, t) = ((h as i64 / 20).max(10), (h as i64 / 100).max(2), (h as i64 / 500).max(1));
@@ -43,7 +44,7 @@ pub fn burn_reticle(rgba: &mut [u8], w: usize, h: usize, prims: &[Prim]) {
     let t = (h as f32 / 400.0).max(2.0);
     let half = t / 2.0;
     let r = |v: f32| v.round() as i64;
-    let mut line = |rgba: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32| {
+    let line = |rgba: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32| {
         fill(rgba, w, h, r(x0.min(x1) - half), r(y0.min(y1) - half), r(x0.max(x1) + half), r(y0.max(y1) + half), RETICLE_RED, 1.0);
     };
     for p in prims {

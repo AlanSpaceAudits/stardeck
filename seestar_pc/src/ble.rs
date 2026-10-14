@@ -302,4 +302,39 @@ mod tests {
         }
         assert!(!s.scopes.is_empty(), "{}", s.status);
     }
+
+    // Live ble_connect: cargo test -- --ignored ble_reads_hotspot --nocapture
+    // Scans, then reads the hotspot credentials from the strongest scope. Sends nothing but ble_connect.
+    #[test]
+    #[ignore]
+    fn ble_reads_hotspot() {
+        let state = Arc::new(Mutex::new(BleState::default()));
+        let printer = state.clone();
+        let tx = spawn(Uuid::new_v4().to_string(), state.clone(), move || {
+            if let Ok(s) = printer.try_lock() {
+                if !s.status.is_empty() {
+                    println!("status: {}", s.status);
+                }
+            }
+        });
+        tx.send(BleCmd::Scan).unwrap();
+        let address = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if let Some(scope) = state.lock().unwrap().scopes.first() {
+                break scope.address.clone();
+            }
+        };
+        tx.send(BleCmd::Connect(address)).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        for _ in 0..170 {
+            std::thread::sleep(Duration::from_millis(500));
+            let s = state.lock().unwrap();
+            if s.connected_to.is_none() {
+                break;
+            }
+        }
+        let s = state.lock().unwrap();
+        println!("final: {}  wifi {:?}", s.status, s.wifi);
+        assert!(s.wifi.as_ref().is_some_and(|w| !w.ssid.is_empty()), "{}", s.status);
+    }
 }

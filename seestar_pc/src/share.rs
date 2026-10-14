@@ -30,6 +30,7 @@ pub fn upload(ip: &str, name: &str, data: &[u8]) -> Res<()> {
 }
 
 /// File names and sizes in MyWorks/StarDeck.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn list(ip: &str) -> Res<Vec<(String, u64)>> {
     with_share(ip, async |client, tree| {
         let entries = client.list_directory(tree, &format!("{FOLDER}/")).await?;
@@ -38,6 +39,7 @@ pub fn list(ip: &str) -> Res<Vec<(String, u64)>> {
 }
 
 /// Removes MyWorks/StarDeck/`name`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn delete(ip: &str, name: &str) -> Res<()> {
     with_share(ip, async |client, tree| Ok(client.delete_file(tree, &format!("{FOLDER}/{name}")).await?))
 }
