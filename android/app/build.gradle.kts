@@ -44,4 +44,6 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.8.0")
 
     testImplementation("junit:junit:4.13.2")
+    // real org.json for parsing tests; android.jar only has stubs
+    testImplementation("org.json:json:20240303")
 }

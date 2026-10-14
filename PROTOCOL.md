@@ -38,7 +38,8 @@ The scope does not answer the UDP 4720 `scan_iscope` broadcast (live). It announ
 | Goto | `iscope_start_view {"mode":"star","selected_cam":"View","target_name":..,"target_ra_dec":[ra_hours, dec_deg],"lp_filter":false}`, JNow |
 | Stop view | `iscope_stop_view {}` or `{"stage":"Stack"|"AutoGoto"|...}` |
 | Stack | `iscope_start_stack {"restart":true}` |
-| Focus | `move_focuser {"step":absolute,"ret_step":false}`, `start_auto_focuse`, `stop_auto_focuse` |
+| Focus | `move_focuser {"step":absolute,"ret_step":false}`, `start_auto_focuse`, `stop_auto_focuse`. Range (live): `get_device_state {"keys":["focuser"]}` gives `{step, max_step, state}`, about 3 ms |
+| Factory focus | `reset_factory_focal_pos {"wide_cam":false}`, result `focal_pos` (`ResetFocalPositionParams`). Position in `setting.factory_focal_pos` (live) |
 | Exposure | `set_setting {"exp_ms":{"stack_l":10000}}`, `{"exp_ms":{"continuous":500}}`, `{"isp_exp_ms":12.5}`, `{"isp_gain":80.0}` |
 | Manual shutter (live) | `set_setting {"manual_exp":true}` then `{"isp_exp_ms":20.0}`; range in `setting.isp_range_exp_us` (30 to 1000000 on the S50) |
 | Record / timelapse (live) | `start_record_avi {"raw":false,"timelapse":{"enable":true,"delay_sec":2,"src_dura_min":-1}}`, `-1` = no end; `stop_record_avi`. State in `View.AviRecord` (`saved_frames`, `name`) |
@@ -69,3 +70,28 @@ Frame = 80-byte big-endian header + payload (live):
 - Preview payload (live): 16-bit little-endian Bayer, `width*height*2` bytes, pattern GRBG on the S50 (`camera.debayer_pattern` = "GR"), 12-bit data shifted left 4.
 - With no image available the payload is the text `there is no image` and width/height are 0 (live).
 - Star mode uses this channel. Scenery and solar modes use RTSP.
+
+## Album
+
+Classes in the official app: `GetAlbumsParams`, `GetAlbumsResult`, `GetAlbumsGroupResult`, `GetAlbumsFileResult` (`com.zwo.seestar.kit.cmd`), `GetAlbumsCmd`, `EnumAlbumCellType`, `AlbumCellBean`, `AlbumService`, `OkHttpAlbumDownloader`, `AlbumFileSocketManager`, `RemotePhotoEntity`, `RemoteBigPhotoEntity`, `AlbumBigCellBean`.
+
+List (4700):
+
+- `get_albums` with no params lists the top folders (live): `{"path":"MyWorks","list":[{"group_name":"Scenery","files":[{"name":"Scenery_video","thn":"Scenery_video/..._thn.jpg","count":9,"type":0}]},{"group_name":"DeepSky",...}]}`.
+- `get_albums {"name":"MyWorks/<folder>"}` lists a folder (live). The name must include `MyWorks/`; a bare folder name gives an empty list. Optional `filter`.
+- Folder reply (live): `path` = the folder; `list` = groups by date, `group_name` "2026-05-31"; each file has `name`, `thn`, `type`, `date` ("2026-05-31 23:24:40"), `is_favorite`, videos `duration_sec`. Some files have `cant_stack`. No file size.
+- File path = `path + "/" + name`; thumbnail = `path + "/" + thn`, for folders too.
+- `type` (`EnumAlbumCellType`): 0 folder, 1 single FITS, 2 live-stacked FITS, 3 post-stacked FITS, 4 video-stacked FITS, 5 mp4, 6 mp4 with AVI, 7 time-lapse mp4, 8 time-lapse mp4 with AVI, 9 other, 10 JPG saved from video, 11 metering FITS. Seen live: 0, 2, 5, 7, 10.
+
+Download (HTTP, port 80):
+
+- `http://<ip>/<path>`, each path segment URL-encoded with spaces as `%20` (`AlbumService.encodeUrlPath`). Files and thumbnails (live). The official downloader adds `?task_id=N` and resumes with `Range`.
+- `HEAD` gives `Content-Length` (live); `Accept-Ranges: bytes` (live). A missing file gives 404 (live).
+- The scope's files sit under `/boot/Image/` (seen in the `ETag`, live).
+
+File port (4801, `AlbumFileSocketManager`):
+
+- No handshake. Send one line `{"id":99,"method":"...","params":{"name":"<path>"}}\r\n`.
+- Methods: `get_img_thumbnail` (`RemotePhotoEntity`), `get_img_file_in_jpg` (`RemoteBigPhotoEntity`, `AlbumBigCellBean`): a FITS file rendered as JPEG.
+- Reply: the 80-byte frame header of the image channel, then the payload (live). `id` echoes 99; `id` 1 is a heartbeat; a 4-byte payload is skipped by the app.
+- Data type 2: the file as is (live: `get_img_thumbnail` of a stacked FITS gave a 148x264 JPEG, `get_img_file_in_jpg` a 1080x1920 JPEG, image type 4). Data type 1: failure, payload is text, e.g. `file not exist` (live). Data type 3: ZIP archive (image channel).
