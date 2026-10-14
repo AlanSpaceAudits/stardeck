@@ -203,6 +203,11 @@ class Link(private val keyPem: String) {
         }
     }
 
+    /** Sends a command and passes the whole reply to `onReply` (called on the command thread; null when the call failed). */
+    fun request(method: String, params: Any? = null, onReply: (JSONObject?) -> Unit) {
+        commands?.execute { onReply(runCatching { cmdScope?.call(method, params) }.getOrNull()) }
+    }
+
     /** Sends the phone's GPS position and GPS time to the scope. The scope's clock takes whole seconds. */
     fun syncGps(gps: Gps) {
         val fix = gps.fix ?: return
