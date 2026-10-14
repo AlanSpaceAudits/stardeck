@@ -140,6 +140,7 @@ object TransitTimer {
 @Composable
 fun ReticlePanel(arcsecPerVideoPx: Double?, fieldArcsec: Pair<Double, Double>?, decDeg: Double?, utcMillis: () -> Long, onChange: () -> Unit) {
     var custom by androidx.compose.runtime.remember { mutableStateOf("") }
+    var inArcmin by androidx.compose.runtime.remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Reticle.SHAPES.forEachIndexed { i, label ->
@@ -153,8 +154,12 @@ fun ReticlePanel(arcsecPerVideoPx: Double?, fieldArcsec: Pair<Double, Double>?, 
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedTextField(custom, { custom = it }, Modifier.width(150.dp), singleLine = true, label = { Text("custom, arcsec") })
-            Chip("Set", false) { custom.toDoubleOrNull()?.takeIf { it > 0 }?.let { Reticle.sizeArcsec = it; onChange() } }
+            OutlinedTextField(custom, { custom = it }, Modifier.width(130.dp), singleLine = true, label = { Text(if (inArcmin) "custom, ′" else "custom, ″") })
+            Chip("″", !inArcmin) { inArcmin = false }
+            Chip("′", inArcmin) { inArcmin = true }
+            Chip("Set", false) {
+                custom.toDoubleOrNull()?.takeIf { it > 0 }?.let { Reticle.sizeArcsec = if (inArcmin) it * 60 else it; onChange() }
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(Reticle.rings, { Reticle.rings = it; onChange() }); Text("rings at 2× and 3×", color = Color.White, fontSize = 13.sp)
