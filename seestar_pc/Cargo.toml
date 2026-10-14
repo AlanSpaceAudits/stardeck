@@ -7,14 +7,20 @@ edition = "2024"
 ab_glyph = "0.2"
 astro = "2.0.0"
 base64 = "0.23.1"
+btleplug = "0.13.5"
 chrono = "0.4.45"
 eframe = "0.36.2"
 epaint_default_fonts = "0.36"
+futures-util = "0.3.34"
 iana-time-zone = "0.1.65"
 if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+netdev = "0.46.3"
 rsa = { version = "0.9.10", features = ["sha1"] }
 serde_json = "1.0.154"
 sha1 = "0.10"
+smb2 = { version = "0.30.0", default-features = false, features = ["tokio"] }
 socket2 = { version = "0.6.5", features = ["all"] }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }
 zip = { version = "9.0.2", default-features = false, features = ["deflate"] }

@@ -1,6 +1,10 @@
+mod ble;
 mod catalog;
+mod field;
 mod hud;
 mod proto;
+mod reticle;
+mod share;
 mod sky;
 mod starlog;
 mod stream;

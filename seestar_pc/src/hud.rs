@@ -2,6 +2,8 @@
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 
+use crate::reticle::Prim;
+
 fn blend(rgba: &mut [u8], w: usize, h: usize, x: i64, y: i64, color: [u8; 3], alpha: f32) {
     if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
         return;
@@ -31,7 +33,47 @@ pub fn burn(rgba: &mut [u8], w: usize, h: usize, lines: &[String], crosshair: bo
         fill(rgba, w, h, cx - t, cy - arm, cx + t, cy - gap, red, 1.0);
         fill(rgba, w, h, cx - t, cy + gap, cx + t, cy + arm, red, 1.0);
     }
+    burn_text(rgba, w, h, lines);
+}
 
+const RETICLE_RED: [u8; 3] = [255, 60, 60];
+
+/// Draws reticle primitives (picture pixel units) into an RGBA frame.
+pub fn burn_reticle(rgba: &mut [u8], w: usize, h: usize, prims: &[Prim]) {
+    let t = (h as f32 / 400.0).max(2.0);
+    let half = t / 2.0;
+    let r = |v: f32| v.round() as i64;
+    let mut line = |rgba: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32| {
+        fill(rgba, w, h, r(x0.min(x1) - half), r(y0.min(y1) - half), r(x0.max(x1) + half), r(y0.max(y1) + half), RETICLE_RED, 1.0);
+    };
+    for p in prims {
+        match *p {
+            // reticle lines are horizontal or vertical
+            Prim::Line(x0, y0, x1, y1) => line(rgba, x0, y0, x1, y1),
+            Prim::Rect(cx, cy, a, b) => {
+                line(rgba, cx - a, cy - b, cx + a, cy - b);
+                line(rgba, cx - a, cy + b, cx + a, cy + b);
+                line(rgba, cx - a, cy - b, cx - a, cy + b);
+                line(rgba, cx + a, cy - b, cx + a, cy + b);
+            }
+            Prim::Circle(cx, cy, radius) => {
+                // one dot per half pixel of circumference
+                let steps = (radius * std::f32::consts::TAU * 2.0).ceil().max(8.0) as usize;
+                for i in 0..steps {
+                    let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                    let (x, y) = (cx + radius * a.cos(), cy + radius * a.sin());
+                    line(rgba, x, y, x, y);
+                }
+            }
+        }
+    }
+}
+
+/// Draws `lines` of text in a dark block at the bottom left of an RGBA frame.
+pub fn burn_text(rgba: &mut [u8], w: usize, h: usize, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
     let Ok(font) = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR) else { return };
     let font = font.as_scaled((h as f32 / 45.0).max(12.0));
     let (line_h, pad) = (font.height() + font.line_gap(), font.height() / 3.0);
@@ -91,5 +133,16 @@ mod tests {
         assert_eq!(two, [2, 2, 2, 2, 1, 1, 1, 1, 4, 4, 4, 4, 3, 3, 3, 3]);
         flip(&mut two, 2, 2, false, true);
         assert_eq!(two, [4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn reticle_burn() {
+        let (w, h) = (400, 400);
+        let mut img = vec![0u8; w * h * 4];
+        burn_reticle(&mut img, w, h, &[Prim::Circle(200.0, 200.0, 100.0), Prim::Rect(200.0, 200.0, 50.0, 50.0)]);
+        let red = |x: usize, y: usize| img[(y * w + x) * 4] == 255;
+        assert!(red(300, 200) && red(100, 200) && red(200, 100) && red(200, 300), "circle");
+        assert!(red(250, 200) && red(200, 150) && red(230, 250), "box");
+        assert!(!red(200, 200) && !red(275, 200), "inside empty");
     }
 }
