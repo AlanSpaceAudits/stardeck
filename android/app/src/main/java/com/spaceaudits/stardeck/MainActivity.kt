@@ -270,6 +270,7 @@ class MainActivity : ComponentActivity() {
 fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePrefs: () -> Unit) {
     var showStarlog by remember { mutableStateOf(false) }
     var recorder by remember { mutableStateOf<HudRecorder?>(null) }
+    var recording by remember { mutableStateOf(false) }
     var recordStart by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var host by remember { mutableStateOf("SeeStar.local") }
@@ -376,24 +377,45 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
     }
 
-    fun toggleRecording() {
-        val r = recorder
-        if (r != null) {
-            recorder = null
-            thread { runCatching { r.stop() } }
-            note = "saved Movies/StarDeck/${r.name}"
+    // Time-lapse: the scope records its own mp4 (no HUD) while the phone saves HUD frames at the same interval.
+    fun toggleTimelapse() {
+        if (lapseRunning) {
+            lapseRunning = false
+            link.send("stop_record_avi")
             return
         }
+        val minutes = (lapseMinutes.toDoubleOrNull() ?: 0.0).let { if (it > 0) Math.round(it).toInt() else -1 }
+        val every = Math.round(lapseSeconds.toDoubleOrNull() ?: 5.0).toInt().coerceAtLeast(1)
+        link.send("start_record_avi", JSONObject().put("raw", false)
+            .put("timelapse", JSONObject().put("enable", true).put("delay_sec", every).put("src_dura_min", minutes)))
+        lapseRunning = true
+    }
+
+    // Video: the scope records the full-resolution original; the phone records the HUD copy.
+    fun toggleRecording() {
+        if (recording) {
+            recording = false
+            link.send("stop_record_avi")
+            val r = recorder
+            recorder = null
+            if (r != null) thread { runCatching { r.stop() } }
+            note = if (r != null) "saved on the scope and Movies/StarDeck/${r.name}" else "saved on the scope"
+            return
+        }
+        link.send("start_record_avi", JSONObject().put("raw", false)
+            .put("timelapse", JSONObject().put("enable", false).put("delay_sec", 0).put("src_dura_min", 0)))
+        recording = true
+        recordStart = System.currentTimeMillis()
         val view = player?.videoSurfaceView as? TextureView
         if (view == null || view.width == 0) {
-            note = "no video yet: start a view"
+            note = "recording on the scope only: no video on the phone"
             return
         }
         val name = "stardeck_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
             .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(gps.utcMillis())) + ".mp4"
         runCatching { HudRecorder(context, view.width, view.height, 15, name) }
-            .onSuccess { recorder = it; recordStart = System.currentTimeMillis(); note = "recording Movies/StarDeck/$name" }
-            .onFailure { note = "recording: ${it.message}" }
+            .onSuccess { recorder = it; note = "recording on the scope and Movies/StarDeck/$name" }
+            .onFailure { note = "recording on the scope only; phone copy failed: ${it.message}" }
     }
 
     val lines = remember(tick, link.pointing, gps.fix, Prefs.dms) { hudLines(link.pointing, gps) }
@@ -446,9 +468,8 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 Spacer(Modifier.width(6.dp))
                 TextButton({ sheetOpen = true }) { Text("☰", color = Color.White, fontSize = 22.sp) }
             }
-            val r = recorder
             val status = when {
-                r != null -> {
+                recording -> {
                     val secs = ((tick - recordStart) / 1000).coerceAtLeast(0)
                     "● REC %d:%02d".format(secs / 60, secs % 60)
                 }
@@ -457,7 +478,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 else -> note.ifEmpty { link.lastReply }
             }
             if (status.isNotEmpty()) {
-                Text(status, Modifier.padding(start = 10.dp, bottom = 4.dp), color = if (r != null || lapseRunning) Color(0xFFFF5A5A) else Color.White, fontSize = 12.sp, maxLines = 1)
+                Text(status, Modifier.padding(start = 10.dp, bottom = 4.dp), color = if (recording || lapseRunning) Color(0xFFFF5A5A) else Color.White, fontSize = 12.sp, maxLines = 1)
             }
         }
 
@@ -497,14 +518,19 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                     ) { Text(label, color = Color.White, fontSize = 12.sp) }
                 }
             }
-            val busy = (captureMode == 2 && recorder != null) || (captureMode == 0 && lapseRunning)
+            val busy = (captureMode == 2 && recording) || (captureMode == 0 && lapseRunning)
             Box(
                 Modifier.size(64.dp).background(Color.White, CircleShape).padding(4.dp)
                     .background(if (busy) Color(0xFFE53935) else Color(0xFFFFFFFF), CircleShape)
                     .clickable {
                         when (captureMode) {
-                            0 -> lapseRunning = !lapseRunning
-                            1 -> note = runCatching { snapshot("snap_")?.let { "saved Pictures/StarDeck/$it" } ?: "no video yet: start a view" }.getOrElse { "save failed: ${it.message}" }
+                            0 -> toggleTimelapse()
+                            1 -> {
+                                // full-resolution original in the scope album, HUD copy on the phone
+                                link.send("save_image")
+                                note = runCatching { snapshot("snap_")?.let { "saved on the scope and Pictures/StarDeck/$it" } ?: "saved on the scope" }
+                                    .getOrElse { "saved on the scope; phone copy failed: ${it.message}" }
+                            }
                             else -> toggleRecording()
                         }
                     },
