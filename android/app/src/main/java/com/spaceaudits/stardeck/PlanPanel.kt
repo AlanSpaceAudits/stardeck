@@ -124,7 +124,7 @@ fun parseViewPlan(o: JSONObject?): ScopePlan? {
     return ScopePlan(plan?.optString("plan_name").orEmpty(), plan?.optString("update_time_seestar").orEmpty(), items, o.optString("state"), o.optLong("lapse_ms"))
 }
 
-private fun replyText(method: String, r: JSONObject?) = when {
+private fun planReplyText(method: String, r: JSONObject?) = when {
     r == null -> "$method: no reply"
     r.optInt("code") != 0 -> "$method: ${r.optString("error").ifEmpty { "code ${r.optInt("code")}" }}"
     else -> "$method: ok"
@@ -149,7 +149,7 @@ fun PlanPanel(link: Link, catalog: Catalog) {
         }
     }
 
-    fun call(method: String, params: Any? = null) = link.request(method, params) { reply = replyText(method, it) }
+    fun call(method: String, params: Any? = null) = link.request(method, params) { reply = planReplyText(method, it) }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("Plan on the scope", style = MaterialTheme.typography.titleMedium)

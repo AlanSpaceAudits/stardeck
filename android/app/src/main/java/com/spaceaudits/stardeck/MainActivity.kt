@@ -110,6 +110,9 @@ class Link(private val keyPem: String) {
     var battery by mutableStateOf("")
     /** the scope has a second (wide-angle) camera, as the S30 does */
     var hasWideCamera by mutableStateOf(false)
+    /** the scope's own hotspot, for joining it in the field */
+    var apSsid by mutableStateOf("")
+    var apPassword by mutableStateOf("")
     /** telescope camera: pixel size in µm, focal length in mm, sensor width in pixels; for sky-angle scales */
     var pixelUm by mutableStateOf<Double?>(null)
     var focalMm by mutableStateOf<Double?>(null)
@@ -127,7 +130,8 @@ class Link(private val keyPem: String) {
     private var cmdScope: Scope? = null
     @Volatile private var generation = 0
 
-    fun connect(host: String) {
+    /** Connects to `host`; on failure tries `fallback` (the hotspot gateway in the field). */
+    fun connect(host: String, fallback: String? = null) {
         disconnect()
         val gen = ++generation
         status = "connecting to $host"
@@ -135,8 +139,12 @@ class Link(private val keyPem: String) {
         exec.execute {
             try {
                 // the scope listens on IPv4 only, and .local names resolve to IPv6 first
-                val addr = InetAddress.getAllByName(host).first { it is Inet4Address }.hostAddress!!
-                cmdScope = Scope(addr, keyPem)
+                fun open(h: String): Pair<String, Scope> {
+                    val a = InetAddress.getAllByName(h).first { it is Inet4Address }.hostAddress!!
+                    return a to Scope(a, keyPem)
+                }
+                val (addr, scope) = runCatching { open(host) }.getOrElse { e -> fallback?.let { open(it) } ?: throw e }
+                cmdScope = scope
                 ip = addr
                 connected = true
                 status = "connected to $host"
@@ -168,12 +176,13 @@ class Link(private val keyPem: String) {
                         if (refresh || System.currentTimeMillis() - lastSettings > 15000) {
                             refresh = false
                             lastSettings = System.currentTimeMillis()
-                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status").put("second_camera").put("camera").put("device"))).optJSONObject("result") ?: JSONObject()
+                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status").put("second_camera").put("camera").put("device").put("ap"))).optJSONObject("result") ?: JSONObject()
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
                             this@Link.setting = setting
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
                             hasWideCamera = state.optJSONObject("second_camera") != null
+                            state.optJSONObject("ap")?.let { ap -> apSsid = ap.optString("ssid"); apPassword = ap.optString("passwd") }
                             state.optJSONObject("camera")?.let { cam ->
                                 pixelUm = cam.optDouble("pixel_size_um").takeIf { it > 0 }
                                 cam.optJSONArray("chip_size")?.let { chipWidth = it.optInt(0).takeIf { w -> w > 0 } }
@@ -324,6 +333,12 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var showStack by remember { mutableStateOf(false) }
     var showDevice by remember { mutableStateOf(false) }
     var showAlbum by remember { mutableStateOf(false) }
+    var showField by remember { mutableStateOf(false) }
+    var showNetwork by remember { mutableStateOf(false) }
+    var showPlan by remember { mutableStateOf(false) }
+    var showMosaic by remember { mutableStateOf(false) }
+    var showCalib by remember { mutableStateOf(false) }
+    var showVersion by remember { mutableStateOf(false) }
     var screenSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val joyLayout = remember { JoyLayout(context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE)) }
     var captureMode by remember { mutableIntStateOf(1) } // 0 time-lapse, 1 photo, 2 video
@@ -381,7 +396,21 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             link.send("scope_speed_move", JSONObject().put("percent", 0).put("angle", 0).put("level", level).put("dur_sec", 3), quiet = true)
         }
     }
-    LaunchedEffect(Unit) { if (!link.connected) link.connect(host.trim()) }
+    // In the field the phone may already be on the Seestar's hotspot; bind to it and use its gateway as the fallback address.
+    LaunchedEffect(Unit) { if (!link.connected) link.connect(host.trim(), FieldWifi.bindToHotspotIfJoined(context)) }
+    LaunchedEffect(Unit) {
+        FieldWifi.ssid = appPrefs.getString("ap_ssid", "") ?: ""
+        FieldWifi.password = appPrefs.getString("ap_password", "") ?: ""
+    }
+    // remember the hotspot credentials whenever the scope reports them
+    LaunchedEffect(link.apSsid, link.apPassword) {
+        if (link.apSsid.isNotEmpty()) {
+            FieldWifi.ssid = link.apSsid
+            FieldWifi.password = link.apPassword
+            appPrefs.edit().putString("ap_ssid", link.apSsid).putString("ap_password", link.apPassword).apply()
+        }
+    }
+    fun joinField() = FieldWifi.join(context) { gw -> link.connect(host.trim(), gw) }
     LaunchedEffect(Unit) {
         var last = -1
         var lastAt = System.nanoTime()
@@ -506,7 +535,11 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         if (ip != null) {
             Video("rtsp://$ip:${if (wideCam) 4555 else 4554}/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
         } else {
-            Text(link.status, Modifier.align(Alignment.Center).padding(24.dp), color = Color.White)
+            Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(link.status, color = Color.White)
+                if (FieldWifi.ssid.isNotBlank()) OverlayButton("Join ${FieldWifi.ssid}") { joinField() }
+                if (FieldWifi.status.isNotEmpty()) Text(FieldWifi.status, color = Color.White)
+            }
         }
         // The picture's own rectangle (video fitted to the screen), so the crosshair and the HUD block sit
         // inside the frame exactly where recordings and snapshots burn them in.
@@ -759,6 +792,21 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 Section("Stacking and star image", showStack, { showStack = it }) { StackPanel(link, stream, gps, hud) }
                 Section("Album", showAlbum, { showAlbum = it }) { AlbumPanel(link) }
                 Section("Device", showDevice, { showDevice = it }) { DevicePanel(link) }
+                Section("Field: Seestar hotspot", showField, { showField = it }) {
+                    Text("Out in the field, join the Seestar's own Wi-Fi. The app fills these in from the scope when it is connected.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(FieldWifi.ssid, { FieldWifi.ssid = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Hotspot name") })
+                    OutlinedTextField(FieldWifi.password, { FieldWifi.password = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Password") })
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button({ joinField() }, enabled = FieldWifi.ssid.isNotBlank()) { Text("Join Seestar Wi-Fi") }
+                        Button({ FieldWifi.leave(context) }) { Text("Leave") }
+                    }
+                    if (FieldWifi.status.isNotEmpty()) Text(FieldWifi.status)
+                }
+                Section("Network (home Wi-Fi)", showNetwork, { showNetwork = it }) { NetworkPanel(link) }
+                Section("Plan", showPlan, { showPlan = it }) { PlanPanel(link, catalog) }
+                Section("Mosaic", showMosaic, { showMosaic = it }) { MosaicPanel(link, catalog) }
+                Section("Calibration", showCalib, { showCalib = it }) { CalibrationPanel(link) }
+                Section("Versions", showVersion, { showVersion = it }) { VersionPanel(link) }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
