@@ -61,7 +61,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.DatagramPacket
@@ -229,16 +231,24 @@ class MainActivity : ComponentActivity() {
         val link = Link(assets.open("seestar_key.pem").bufferedReader().readText())
         val catalog = Catalog(assets.open("catalog.tsv").bufferedReader().readText())
         val gps = Gps(this)
+        val starlog = StarlogState()
+        val prefs = getSharedPreferences("stardeck", MODE_PRIVATE)
+        Prefs.dms = prefs.getBoolean("dms", false)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { Screen(link, catalog, gps) }
+                Surface(Modifier.fillMaxSize()) {
+                    Screen(link, catalog, gps, starlog) { prefs.edit().putBoolean("dms", Prefs.dms).apply() }
+                }
             }
         }
     }
 }
 
 @Composable
-fun Screen(link: Link, catalog: Catalog, gps: Gps) {
+fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePrefs: () -> Unit) {
+    var showStarlog by remember { mutableStateOf(false) }
+    var recorder by remember { mutableStateOf<HudRecorder?>(null) }
+    var recordStart by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var host by remember { mutableStateOf("SeeStar.local") }
     var video by remember { mutableStateOf(false) }
@@ -308,6 +318,25 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
         lapseRunning = false
     }
 
+    // the phone's GPS position when locked, else the position stored in the scope
+    val site = gps.fix?.takeIf { gps.locked() }?.let { it.latitude to it.longitude } ?: link.scopeLatLon
+    LaunchedEffect(link.pointing) { starlog.onPointing(link.pointing, site, gps.utcMillis()) }
+
+    // Video recording with the HUD: the displayed frames, flipped and with the HUD drawn in, about 15 per second.
+    LaunchedEffect(recorder) {
+        val r = recorder ?: return@LaunchedEffect
+        while (true) {
+            val frame = (player?.videoSurfaceView as? TextureView)?.bitmap
+            if (frame != null) {
+                val lines = if (hud) hudLines(link.pointing, gps) else null
+                val (fh, fv) = flipH to flipV
+                runCatching { withContext(Dispatchers.Default) { r.draw(burnHud(frame, fh, fv, lines)) } }
+                    .onFailure { note = "recording: ${it.message}" }
+            }
+            delay(66)
+        }
+    }
+
     Column(
         Modifier.systemBarsPadding().padding(12.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -364,10 +393,38 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
                 Text("Save snapshot")
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val r = recorder
+            if (r == null) {
+                Button({
+                    val view = player?.videoSurfaceView as? TextureView
+                    if (view == null || view.width == 0) {
+                        note = "turn the video on first"
+                    } else {
+                        val name = "stardeck_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                            .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(gps.utcMillis())) + ".mp4"
+                        runCatching { HudRecorder(context, view.width, view.height, 15, name) }
+                            .onSuccess { recorder = it; recordStart = System.currentTimeMillis(); note = "recording Movies/StarDeck/$name" }
+                            .onFailure { note = "recording: ${it.message}" }
+                    }
+                }) { Text("Record video") }
+            } else {
+                val secs = ((tick - recordStart) / 1000).coerceAtLeast(0)
+                Button({
+                    recorder = null
+                    thread { runCatching { r.stop() } }
+                    note = "saved Movies/StarDeck/${r.name}"
+                }) { Text("Stop video recording  %d:%02d".format(secs / 60, secs % 60)) }
+            }
+        }
+        Text(if (hud) "Recordings and snapshots carry the HUD." else "HUD off: recordings and snapshots are the plain picture.", style = MaterialTheme.typography.bodySmall)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(hud, { hud = it }); Text("HUD")
             Checkbox(flipH, { flipH = it }); Text("flip H")
             Checkbox(flipV, { flipV = it }); Text("flip V")
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(Prefs.dms, { Prefs.dms = it; savePrefs() }); Text("angles in DMS (off: decimal degrees)")
         }
         if (note.isNotEmpty()) Text(note)
 
@@ -409,8 +466,6 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
             Checkbox(link.tracking, { link.send("scope_set_track_state", it) })
             Text("tracking")
         }
-        // the phone's GPS position when locked, else the position stored in the scope
-        val site = gps.fix?.takeIf { gps.locked() }?.let { it.latitude to it.longitude } ?: link.scopeLatLon
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StarMenu(link, catalog, site) { gps.utcMillis() }
             Button({ link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }) { Text("Scenery") }
@@ -438,6 +493,13 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps) {
             Text("Level", style = MaterialTheme.typography.titleMedium)
         }
         if (showLevel) LevelPanel(link)
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(showStarlog, { showStarlog = it })
+            Text("Starlog", style = MaterialTheme.typography.titleMedium)
+            if (starlog.log != null) Text("  logging, ${starlog.crossings.size} crossings", style = MaterialTheme.typography.bodySmall)
+        }
+        if (showStarlog) StarlogPanel(starlog, link, gps, site)
 
         Text("Go to object", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("M 31, NGC 7000, Orion Nebula") })

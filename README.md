@@ -82,8 +82,9 @@ The official app and StarDeck can be connected at the same time.
 | Shutter (exposure) in milliseconds | yes | yes |
 | Timelapse frames saved by the app | yes | yes |
 | Timelapse recorded on the telescope | yes | yes |
-| Starlog: stars that cross the field centre, to CSV | no | yes |
-| Video recording to an mp4 file on the PC | no | yes |
+| Starlog: stars that cross the field centre, to CSV | yes | yes |
+| Video recording to an mp4 file, HUD burned in when the HUD is on | yes | yes |
+| Angles in decimal degrees or degrees, minutes, seconds | yes | no |
 | Interface size buttons, size set from the monitor | no | yes |
 | JSON output of the pointing data | UDP | text lines |
 | Slew pad, open arm, park, tracking | yes | yes |

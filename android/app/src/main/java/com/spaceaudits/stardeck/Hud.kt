@@ -10,6 +10,9 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -18,14 +21,20 @@ import java.util.TimeZone
 
 private fun utcFormat(pattern: String) = SimpleDateFormat(pattern, Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
 
-/** The data block shown on the HUD and burned into saved frames. */
+/** App preferences that several screens read. Loaded and saved by MainActivity. */
+object Prefs {
+    /** Angles as degrees, minutes, seconds instead of decimal degrees. */
+    var dms by mutableStateOf(false)
+}
+
+/** The data block shown on the HUD and burned into saved frames and recordings. */
 fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
-    fun v(k: String, digits: Int) = pointing?.optDouble(k)?.takeIf { !it.isNaN() }?.let { "%.${digits}f°".format(Locale.US, it) } ?: "--"
+    fun v(k: String) = pointing?.optDouble(k)?.takeIf { !it.isNaN() }?.let { fmtDeg(it, Prefs.dms, signed = k == "alt") } ?: "--"
     val fix = gps.fix
     val locked = gps.locked()
     return listOf(
-        "Az ${v("az", 4)}  El ${v("alt", 4)}",
-        if (fix != null) "Lat %.5f°  Lon %.5f°  ±%.0f m".format(Locale.US, fix.latitude, fix.longitude, fix.accuracy) else "Lat --  Lon --",
+        "Az ${v("az")}  El ${v("alt")}",
+        if (fix != null) "Lat ${fmtDeg(fix.latitude, Prefs.dms, digits = 5)}  Lon ${fmtDeg(fix.longitude, Prefs.dms, digits = 5)}  ±%.0f m".format(Locale.US, fix.accuracy) else "Lat --  Lon --",
         utcFormat("yyyy-MM-dd HH:mm:ss.SSS").format(Date(gps.utcMillis())) + if (locked) " UTC (GPS)" else " UTC (phone clock)",
     )
 }
