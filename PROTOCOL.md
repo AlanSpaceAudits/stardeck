@@ -95,3 +95,31 @@ File port (4801, `AlbumFileSocketManager`):
 - Methods: `get_img_thumbnail` (`RemotePhotoEntity`), `get_img_file_in_jpg` (`RemoteBigPhotoEntity`, `AlbumBigCellBean`): a FITS file rendered as JPEG.
 - Reply: the 80-byte frame header of the image channel, then the payload (live). `id` echoes 99; `id` 1 is a heartbeat; a 4-byte payload is skipped by the app.
 - Data type 2: the file as is (live: `get_img_thumbnail` of a stacked FITS gave a 148x264 JPEG, `get_img_file_in_jpg` a 1080x1920 JPEG, image type 4). Data type 1: failure, payload is text, e.g. `file not exist` (live). Data type 3: ZIP archive (image channel).
+
+## Observation plan
+
+Classes in the official app: `SetViewPlanCmd`, `ReStartViewPlanCmd`, `ClearViewPlanCmd`, `StopFuncCmd` (`com.zwo.seestar.socket.command`), `ViewPlan`, `PlanEntity`, `PlanTarget`, `PlanMosaic`, `PlanOutputFile`, `PlanFile` (`com.zwo.seestar.kit.data`, from `ViewPlan.kt`), `AstroPlanViewModel.actionPlan`, `DeviceEventPart.processViewPlanEvent`, `PlanViewModel` (auto plan via `com.zwo.plancapture`). Not tried on a scope yet.
+
+- Send and start: `set_view_plan` with the plan as params (`AstroPlanViewModel.actionPlan`, called when the user starts a plan):
+  `{"plan_name":"..","update_time_seestar":"yyyy-MM-dd","list":[{"lp_filter":false,"target_id":123456789,"target_ra_dec":[ra_hours,dec_deg],"target_name":"M 31","alias_name":"NGC 224","start_min":1380,"duration_min":60,"mosaic":{"scale":1.5,"angle":30,"star_map_angle":0}}]}`.
+  The list is sorted by `start_min`. `mosaic` is left out when scale is 1 and both angles are 0. `stack_total_sec` is in `PlanTarget` but `SetViewPlanCmd` does not send it.
+- `start_min`: minutes from local midnight of the plan day; times after midnight get +1440 (`PlanViewModel.toPlanStartMin`). Display is `(start_min/60)%24`.
+- `target_ra_dec`: J2000 (`PlanViewModel` converts JNow to J2000 with `getJNowToJ2000` before it builds a target). A goto uses coordinates of date.
+- `target_id`: `(currentTimeMillis % 1000000) * 1000 + n` (`PlanService.generateShortTargetId`, `PlanViewModel.generateAutoPlanTargetId`).
+- Restart the stored plan: `set_view_plan` with no params (`ReStartViewPlanCmd`). Code 268 = operation in progress.
+- Stop: `stop_func {"name":"ViewPlan"}` (`BaseDeviceViewModel`, `AstroPlanViewModel`).
+- Delete the stored plan: `clear_view_plan`, no params (`ClearViewPlanCmd`).
+- Read back: `iscope_get_app_state` result key `ViewPlan` (`AppStateData`): `{"state":..,"lapse_ms":..,"plan":{"plan_name","update_time_seestar","list":[PlanTarget]}}`. Each `PlanTarget` can also carry `state`, `code`, `error`, `output_file {"path","files":[{"name","thn","date","type"}]}`, `stack_total_sec`.
+- Events: `ViewPlan` with the same object as above; `Target` with `target_id`, `state`, `code`, `output_file`, `stack_total_sec` for one plan target (`DeviceEventPart.processPlanTargetEvent`).
+- States (`DeviceEventPart.switchState`, `PlanUtil.getPlanStatus`): `idle`, `working`, `complete`, `cancel`, `fail`.
+- Park after the plan: `set_setting {"viewplan_gohome": true}` (`SetSettingParams`, `SeestarSetting`).
+- Constants with no call site in this build: `get_view_plan`, `set_plan`, `get_plan`, `list_plan`, `import_plan`, `get_enabled_plan`, `reset_plan`, `delete_plan`, `clear_plan` (`MainCameraConstants`).
+
+## Mosaic
+
+Classes: `StartViewParams`, `StartGotoMosaicParams` (`com.zwo.seestar.kit.cmd`), `SeestarSettingMosaic`, `MosaicData`, `SkyViewModel`, `SkyViewDelegate.clickGoto`, `StarMosaicControlPop`, `GetSettingCmd`.
+
+- Goto with mosaic: `iscope_start_view {"mode":"star","selected_cam":"View","target_name":..,"target_ra_dec":[ra_hours,dec_deg],"lp_filter":false,"mosaic":{"scale":1.5,"angle":30,"star_map_angle":12.3}}` (`SkyViewDelegate.clickGoto` to `BaseDeviceViewModel.startStarMode`). Coordinates of date. The `mosaic` object is sent only when scale is not 1 or angle is not 0 (`MosaicData.isMosaic`). `selected_cam` is `View` (telescope) or `SecondView` (wide).
+- Ranges (`StarMosaicControlPop`): scale 1.0 to 2.0 in steps of 0.1; angle -90 to 90° in steps of 1° for the telescope camera; 0 or 90° for the wide camera.
+- `star_map_angle` comes from the sky-map renderer (`GetSeestarTargetObjAngle`, native). Its meaning is not confirmed; StarDeck sends 0.
+- The scope reports the active mosaic in `get_device_state` `setting.mosaic` (`second_camera` setting for the wide camera): `scale`, `angle`, `star_map_angle`, `star_map_ratio`, `estimated_hours` (`GetSettingCmd`).
