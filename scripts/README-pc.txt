@@ -7,6 +7,11 @@ Linux:   unpack, then run ./install-linux.sh (adds a menu entry), or run ./stard
 
 The PC and the telescope must be on the same network. The host field holds SeeStar.local.
 If the connection fails, type the IP address of the telescope.
+In the field: join the telescope's hotspot in the PC's Wi-Fi settings. When SeeStar.local does not
+answer, the app connects to the Wi-Fi gateway, which is the telescope. The Field section shows the
+hotspot name and password; "Bluetooth scan" finds telescopes nearby and reads them over Bluetooth.
+Photo and Video follow the Storage choice. HUD copies for the telescope go to its share
+"EMMC Images", folder MyWorks\StarDeck.
 Saved frames and timelapse folders go into the folder the app starts in.
 
 ffmpeg is included for the live video. It is a build from https://github.com/BtbN/FFmpeg-Builds

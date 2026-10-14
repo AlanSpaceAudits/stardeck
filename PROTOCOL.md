@@ -150,7 +150,7 @@ From the decompiled app 3.3.0; not yet checked live. Class names are the evidenc
 
 ## Bluetooth LE
 
-From the decompiled app 3.3.0; not yet checked live. BLE runs in Java/Kotlin on RxAndroidBle (`com.polidea.rxandroidble2`, with its own Dagger under `bleshadow`); no native library takes part. Main classes: `BleUtilsV2` (discovery, connect, band, country), `BleUtils` (log download), `BtParseInfo` (advertisement parse), `BleWifiData` (connect result), `NearbyDiscoveryDelegate`, `DeviceDiscoveryConnectDialog`, `ConnectDialog`.
+From the decompiled app 3.3.0. Checked live from the PC app (btleplug on BlueZ, S50 firmware 2846): the scope advertises the service UUID below with the name `S50_<sn>` (the hotspot SSID) and manufacturer data company id `0x3553` plus `30 00 00 00 00`, which reads as `S50` when the id bytes are included. BlueZ discovery with a service-UUID filter failed on the test adapter ("No discovery started"); an unfiltered scan filtered by the advertised services works. A `ble_connect` with a `ble_sn` the scope had not seen got code 1003, then a code-0 reply with `ssid`, `pwd`, `sn`, `model`, `bssid`, `freq`, `fw_version`, `is_bridge` within the 60 s window. BLE runs in Java/Kotlin on RxAndroidBle (`com.polidea.rxandroidble2`, with its own Dagger under `bleshadow`); no native library takes part. Main classes: `BleUtilsV2` (discovery, connect, band, country), `BleUtils` (log download), `BtParseInfo` (advertisement parse), `BleWifiData` (connect result), `NearbyDiscoveryDelegate`, `DeviceDiscoveryConnectDialog`, `ConnectDialog`.
 
 Advertisement and GATT:
 
