@@ -365,10 +365,24 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
     }
 
-    fun snapshot(): String? {
+    fun snapshot(): Saved? {
         val frame = (player?.videoSurfaceView as? TextureView)?.bitmap ?: return null
         val lines = if (hud) hudLines(link.pointing, gps) else null
         return savePng(context, burnHud(frame, flipH, flipV, lines), gps.utcMillis())
+    }
+
+    // The Seestar cannot draw the HUD itself, so the phone makes the HUD copy and, when the Seestar is a
+    // storage target, copies it to MyWorks/StarDeck on the Seestar; with "Seestar only" the phone copy is then removed.
+    val hudCopyNeeded = Storage.onPhone || (Storage.onSeestar && hud)
+    fun deliver(saved: Saved) {
+        val ip = link.ip
+        if (!Storage.onSeestar || !hud || ip == null) return
+        val keep = Storage.onPhone
+        thread {
+            runCatching { context.contentResolver.openInputStream(saved.uri)!!.use { SeestarShare.upload(ip, saved.name, it) } }
+                .onSuccess { if (!keep) context.contentResolver.delete(saved.uri, null, null) }
+                .onFailure { note = "HUD copy to the Seestar failed: ${it.message}" }
+        }
     }
 
     // App-side interval capture: one frame every interval, HUD burned in when it is on.
@@ -379,7 +393,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         val start = System.currentTimeMillis()
         lapseSaved = 0
         while (minutes <= 0 || System.currentTimeMillis() - start < minutes * 60000) {
-            if (Storage.onPhone) runCatching { snapshot() }.onSuccess { if (it != null) lapseSaved++ }.onFailure { note = "timelapse: ${it.message}" }
+            if (hudCopyNeeded) runCatching { snapshot() }.onSuccess { if (it != null) { lapseSaved++; deliver(it) } }.onFailure { note = "timelapse: ${it.message}" }
             delay(interval)
         }
         lapseRunning = false
@@ -425,9 +439,9 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             if (seestarRecording) link.send("stop_record_avi")
             val r = recorder
             recorder = null
-            if (r != null) thread { runCatching { r.stop() } }
-            note = listOfNotNull("the Seestar".takeIf { seestarRecording }, r?.let { "Movies/StarDeck/${it.name}" })
-                .joinToString(" and ").let { if (it.isEmpty()) "" else "saved on $it" }
+            if (r != null) thread { runCatching { r.stop() }.onSuccess { deliver(Saved(r.name, r.uri)) } }
+            note = if (seestarRecording || r != null) "saved" + (if (seestarRecording) " on the Seestar" else "") +
+                (if (r != null && Storage.onPhone) " and Movies/StarDeck/${r.name}" else "") else ""
             seestarRecording = false
             return
         }
@@ -436,7 +450,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             .put("timelapse", JSONObject().put("enable", false).put("delay_sec", 0).put("src_dura_min", 0)))
         recording = true
         recordStart = System.currentTimeMillis()
-        if (!Storage.onPhone) {
+        if (!hudCopyNeeded) {
             note = "recording on the Seestar"
             return
         }
@@ -609,9 +623,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                             1 -> {
                                 // full-size original in the Seestar album, HUD copy on the phone (per the Storage choice)
                                 if (Storage.onSeestar) link.send("save_image")
-                                val phone = if (Storage.onPhone) runCatching { snapshot() }.getOrElse { note = "phone copy failed: ${it.message}"; null } else null
-                                note = listOfNotNull("the Seestar".takeIf { Storage.onSeestar }, phone?.let { "Pictures/StarDeck/$it" })
-                                    .joinToString(" and ").let { if (it.isEmpty()) note else "saved on $it" }
+                                val copy = if (hudCopyNeeded) runCatching { snapshot() }.getOrElse { note = "HUD copy failed: ${it.message}"; null } else null
+                                copy?.let { deliver(it) }
+                                note = "saved" + (if (Storage.onSeestar) " on the Seestar" else "") +
+                                    (if (copy != null && Storage.onPhone) " and Pictures/StarDeck/${copy.name}" else "")
                             }
                             else -> toggleRecording()
                         }

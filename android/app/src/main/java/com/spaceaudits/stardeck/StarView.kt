@@ -152,7 +152,7 @@ fun StackPanel(link: Link, stream: ImageStreamClient, gps: Gps, hud: Boolean) {
             val lines = if (hud) hudLines(link.pointing, gps) else null
             scope.launch {
                 note = runCatching {
-                    withContext(Dispatchers.IO) { "saved " + savePng(context, burnHud(frame, false, false, lines), gps.utcMillis()) }
+                    withContext(Dispatchers.IO) { "saved " + savePng(context, burnHud(frame, false, false, lines), gps.utcMillis()).name }
                 }.getOrElse { "save failed: ${it.message}" }
             }
         }, enabled = stream.frame != null) { Text(if (hud) "Save image with HUD" else "Save image") }

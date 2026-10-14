@@ -21,7 +21,7 @@ class HudRecorder(private val context: Context, width: Int, height: Int, fps: In
     // encoders want even sizes; multiples of 16 suit all of them
     private val w = width / 16 * 16
     private val h = height / 16 * 16
-    private val uri: Uri
+    val uri: Uri
     private val pfd: android.os.ParcelFileDescriptor
     private val muxer: MediaMuxer
     private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)

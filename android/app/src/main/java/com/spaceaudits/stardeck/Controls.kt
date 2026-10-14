@@ -71,7 +71,8 @@ fun StorageMenu(onChange: () -> Unit) {
                 { Storage.raw = !Storage.raw; onChange() },
             )
             Text(
-                "The Seestar keeps the full-size picture without the HUD. The phone keeps the HUD copy.",
+                "The Seestar keeps its full-size picture, and the HUD copy goes to MyWorks/StarDeck on the Seestar. " +
+                    "The phone keeps a HUD copy when it is a storage target.",
                 Modifier.padding(horizontal = 16.dp, vertical = 6.dp), fontSize = 12.sp,
             )
         }

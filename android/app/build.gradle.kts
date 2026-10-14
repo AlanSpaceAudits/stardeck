@@ -39,6 +39,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.11.0")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("io.github.cosinekitty:astronomy:2.1.19")
+    implementation("com.hierynomus:smbj:0.14.0")
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-exoplayer-rtsp:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")

@@ -69,8 +69,11 @@ fun burnHud(frame: Bitmap, flipH: Boolean, flipV: Boolean, lines: List<String>?)
     return out
 }
 
-/** Saves into Pictures/StarDeck; returns the file name. */
-fun savePng(context: Context, bitmap: Bitmap, utcMillis: Long): String {
+/** A file the app saved on the phone. */
+class Saved(val name: String, val uri: android.net.Uri)
+
+/** Saves into Pictures/StarDeck. */
+fun savePng(context: Context, bitmap: Bitmap, utcMillis: Long): Saved {
     val name = epochName(utcMillis, "png")
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, name)
@@ -79,5 +82,5 @@ fun savePng(context: Context, bitmap: Bitmap, utcMillis: Long): String {
     }
     val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("could not create $name")
     context.contentResolver.openOutputStream(uri)!!.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-    return name
+    return Saved(name, uri)
 }
