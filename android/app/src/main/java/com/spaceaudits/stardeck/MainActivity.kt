@@ -11,6 +11,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -93,6 +103,7 @@ class Link(private val keyPem: String) {
     var settings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var stackSettings by mutableStateOf<Map<String, Boolean>>(emptyMap())
     var scopeLocation by mutableStateOf("")
+    var battery by mutableStateOf("")
     /** latitude, east longitude stored in the scope */
     var scopeLatLon by mutableStateOf<Pair<Double, Double>?>(null)
     /** balance_sensor and compass_sensor, refreshed quickly while the level display is open */
@@ -147,10 +158,11 @@ class Link(private val keyPem: String) {
                         if (refresh || System.currentTimeMillis() - lastSettings > 15000) {
                             refresh = false
                             lastSettings = System.currentTimeMillis()
-                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat"))).optJSONObject("result") ?: JSONObject()
+                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status"))).optJSONObject("result") ?: JSONObject()
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
+                            state.optJSONObject("pi_status")?.let { battery = "${it.optInt("battery_capacity")}%" + if (it.optBoolean("charge_online")) " ⚡" else "" }
                             val here = state.optJSONArray("location_lon_lat")
                             scopeLocation = here?.let { "lat %.4f, lon %.4f".format(it.optDouble(1), it.optDouble(0)) } ?: ""
                             scopeLatLon = here?.takeIf { !it.optDouble(1).isNaN() && !it.optDouble(0).isNaN() }?.let { it.optDouble(1) to it.optDouble(0) }
@@ -249,6 +261,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePrefs: () -> Unit) {
     var showStarlog by remember { mutableStateOf(false) }
@@ -260,8 +273,11 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var hud by remember { mutableStateOf(true) }
     var flipH by remember { mutableStateOf(false) }
     var flipV by remember { mutableStateOf(false) }
-    var speed by remember { mutableFloatStateOf(40f) }
-    var held by remember { mutableStateOf<Int?>(null) }
+    var joy by remember { mutableStateOf<Pair<Int, Int>?>(null) } // angle, percent while the stick is held
+    var fast by remember { mutableStateOf(true) }
+    var joystickOn by remember { mutableStateOf(true) }
+    var sheetOpen by remember { mutableStateOf(false) }
+    var captureMode by remember { mutableIntStateOf(1) } // 0 time-lapse, 1 photo, 2 video
     var query by remember { mutableStateOf("") }
     var showLevel by remember { mutableStateOf(false) }
     var shutterMs by remember { mutableStateOf("10") }
@@ -290,18 +306,22 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
     }
 
-    // Resend while a direction is held; the scope stops on percent 0.
-    LaunchedEffect(held) {
-        val angle = held ?: return@LaunchedEffect
+    // Resend every 200 ms while the stick is held; percent 0 stops the scope.
+    val joyNow by rememberUpdatedState(joy)
+    val level = if (fast) 1 else 0
+    LaunchedEffect(joy != null) {
+        if (joy == null) return@LaunchedEffect
         try {
             while (true) {
-                link.send("scope_speed_move", JSONObject().put("percent", speed.toInt()).put("angle", angle).put("level", 1).put("dur_sec", 3), quiet = true)
+                val (angle, percent) = joyNow ?: break
+                link.send("scope_speed_move", JSONObject().put("percent", percent).put("angle", angle).put("level", level).put("dur_sec", 3), quiet = true)
                 delay(200)
             }
         } finally {
-            link.send("scope_speed_move", JSONObject().put("percent", 0).put("angle", 0).put("level", 1).put("dur_sec", 3), quiet = true)
+            link.send("scope_speed_move", JSONObject().put("percent", 0).put("angle", 0).put("level", level).put("dur_sec", 3), quiet = true)
         }
     }
+    LaunchedEffect(Unit) { if (!link.connected) link.connect(host.trim()) }
 
     fun snapshot(prefix: String): String? {
         val frame = (player?.videoSurfaceView as? TextureView)?.bitmap ?: return null
@@ -342,223 +362,274 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
         }
     }
 
-    Column(
-        Modifier.systemBarsPadding().padding(12.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(host, { host = it }, Modifier.weight(1f), singleLine = true, label = { Text("Host or IP") })
-            Button({ if (link.connected) link.disconnect() else link.connect(host.trim()) }) {
-                Text(if (link.connected) "Disconnect" else "Connect")
+    fun toggleRecording() {
+        val r = recorder
+        if (r != null) {
+            recorder = null
+            thread { runCatching { r.stop() } }
+            note = "saved Movies/StarDeck/${r.name}"
+            return
+        }
+        val view = player?.videoSurfaceView as? TextureView
+        if (view == null || view.width == 0) {
+            note = "no video yet: start a view"
+            return
+        }
+        val name = "stardeck_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(gps.utcMillis())) + ".mp4"
+        runCatching { HudRecorder(context, view.width, view.height, 15, name) }
+            .onSuccess { recorder = it; recordStart = System.currentTimeMillis(); note = "recording Movies/StarDeck/$name" }
+            .onFailure { note = "recording: ${it.message}" }
+    }
+
+    val lines = remember(tick, link.pointing, gps.fix, Prefs.dms) { hudLines(link.pointing, gps) }
+
+    // Observation screen: the video fills the screen and the controls sit on top of it, as in the official app.
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        val ip = link.ip
+        if (ip != null) {
+            Video("rtsp://$ip:4554/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
+        } else {
+            Text(link.status, Modifier.align(Alignment.Center).padding(24.dp), color = Color.White)
+        }
+        if (hud) {
+            Canvas(Modifier.fillMaxSize()) {
+                val c = Offset(size.width / 2, size.height / 2)
+                val (arm, gap) = size.minDimension / 12 to size.minDimension / 60
+                val red = Color(0xFFFF3C3C)
+                drawLine(red, c - Offset(arm, 0f), c - Offset(gap, 0f), 3f)
+                drawLine(red, c + Offset(gap, 0f), c + Offset(arm, 0f), 3f)
+                drawLine(red, c - Offset(0f, arm), c - Offset(0f, gap), 3f)
+                drawLine(red, c + Offset(0f, gap), c + Offset(0f, arm), 3f)
             }
         }
-        Text(link.status)
 
-        val lines = remember(tick, link.pointing, gps.fix) { hudLines(link.pointing, gps) }
-        Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-
-        // GPS lock indicator and sync
-        val fix = gps.fix
-        val gpsText = when {
-            !gpsGranted -> "GPS: permission not granted"
-            fix == null -> "GPS: no fix yet (${gps.satellitesSeen} satellites in view)"
-            !gps.locked() -> "GPS: fix lost (${gps.satellitesSeen} satellites in view)"
-            else -> "GPS: LOCKED  ±%.0f m  %d of %d satellites".format(fix.accuracy, gps.satellitesUsed, gps.satellitesSeen)
-        }
-        Text(gpsText, color = if (gpsGranted && gps.locked()) Color(0xFF7CFC8A) else Color(0xFFFFB74D))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (!gpsGranted) Button({ askGps.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) { Text("Allow GPS") }
-            Button({ link.syncGps(gps) }, enabled = link.connected && gps.locked()) { Text("Send GPS to scope") }
-        }
-        if (link.scopeLocation.isNotEmpty()) Text("scope has ${link.scopeLocation}", style = MaterialTheme.typography.bodySmall)
-
-        if (video && link.ip != null) {
-            Box(Modifier.size(236.dp, 420.dp)) {
-                Video("rtsp://${link.ip}:4554/stream", Modifier.fillMaxSize().graphicsLayer(scaleX = if (flipH) -1f else 1f, scaleY = if (flipV) -1f else 1f)) { player = it }
-                if (hud) {
-                    Canvas(Modifier.matchParentSize()) {
-                        val c = Offset(size.width / 2, size.height / 2)
-                        val (arm, gap) = size.height / 20 to size.height / 100
-                        val red = Color(0xFFFF3C3C)
-                        drawLine(red, c - Offset(arm, 0f), c - Offset(gap, 0f), 3f)
-                        drawLine(red, c + Offset(gap, 0f), c + Offset(arm, 0f), 3f)
-                        drawLine(red, c - Offset(0f, arm), c - Offset(0f, gap), 3f)
-                        drawLine(red, c + Offset(0f, gap), c + Offset(0f, arm), 3f)
-                    }
-                    Text(
-                        lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 8.sp, lineHeight = 10.sp, color = Color.White,
-                        modifier = Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color(0xA5000000)).padding(3.dp),
-                    )
-                }
+        // top bar
+        Column(Modifier.fillMaxWidth().background(Color(0x88000000)).statusBarsPadding()) {
+            Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (link.connected) "StarDeck" else link.status, Modifier.weight(1f), color = Color.White, maxLines = 1)
+                val gpsColor = if (gpsGranted && gps.locked()) Color(0xFF7CFC8A) else Color(0xFFFFB74D)
+                Text(if (gps.locked()) "GPS" else "GPS?", color = gpsColor, fontSize = 12.sp)
+                Spacer(Modifier.width(10.dp))
+                if (link.battery.isNotEmpty()) Text(link.battery, color = Color.White, fontSize = 13.sp)
+                Spacer(Modifier.width(6.dp))
+                TextButton({ sheetOpen = true }) { Text("☰", color = Color.White, fontSize = 22.sp) }
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button({ video = !video }) { Text(if (video) "Hide video" else "Video") }
-            Button({ note = runCatching { snapshot("snap_")?.let { "saved Pictures/StarDeck/$it" } ?: "turn the video on first" }.getOrElse { "save failed: ${it.message}" } }) {
-                Text("Save snapshot")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val r = recorder
-            if (r == null) {
-                Button({
-                    val view = player?.videoSurfaceView as? TextureView
-                    if (view == null || view.width == 0) {
-                        note = "turn the video on first"
-                    } else {
-                        val name = "stardeck_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
-                            .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(gps.utcMillis())) + ".mp4"
-                        runCatching { HudRecorder(context, view.width, view.height, 15, name) }
-                            .onSuccess { recorder = it; recordStart = System.currentTimeMillis(); note = "recording Movies/StarDeck/$name" }
-                            .onFailure { note = "recording: ${it.message}" }
-                    }
-                }) { Text("Record video") }
-            } else {
-                val secs = ((tick - recordStart) / 1000).coerceAtLeast(0)
-                Button({
-                    recorder = null
-                    thread { runCatching { r.stop() } }
-                    note = "saved Movies/StarDeck/${r.name}"
-                }) { Text("Stop video recording  %d:%02d".format(secs / 60, secs % 60)) }
-            }
-        }
-        Text(if (hud) "Recordings and snapshots carry the HUD." else "HUD off: recordings and snapshots are the plain picture.", style = MaterialTheme.typography.bodySmall)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(hud, { hud = it }); Text("HUD")
-            Checkbox(flipH, { flipH = it }); Text("flip H")
-            Checkbox(flipV, { flipV = it }); Text("flip V")
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(Prefs.dms, { Prefs.dms = it; savePrefs() }); Text("angles in DMS (off: decimal degrees)")
-        }
-        if (note.isNotEmpty()) Text(note)
-
-        Text("Shutter", style = MaterialTheme.typography.titleMedium)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(shutterMs, { shutterMs = it }, Modifier.weight(1f), singleLine = true, label = { Text("exposure, ms (0.03 to 1000)") })
-            Button({
-                shutterMs.toDoubleOrNull()?.let {
-                    link.send("set_setting", JSONObject().put("manual_exp", true))
-                    link.send("set_setting", JSONObject().put("isp_exp_ms", it))
+            val status = when {
+                r != null -> {
+                    val secs = ((tick - recordStart) / 1000).coerceAtLeast(0)
+                    "● REC %d:%02d".format(secs / 60, secs % 60)
                 }
-            }) { Text("Set") }
-            Button({ link.send("set_setting", JSONObject().put("manual_exp", false)) }) { Text("Auto") }
+                lapseRunning -> "● TIME-LAPSE  $lapseSaved frames"
+                starlog.log != null -> "STARLOG  ${starlog.crossings.size} crossings"
+                else -> note.ifEmpty { link.lastReply }
+            }
+            if (status.isNotEmpty()) {
+                Text(status, Modifier.padding(start = 10.dp, bottom = 4.dp), color = if (r != null || lapseRunning) Color(0xFFFF5A5A) else Color.White, fontSize = 12.sp, maxLines = 1)
+            }
         }
 
-        Text("Timelapse", style = MaterialTheme.typography.titleMedium)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(lapseSeconds, { lapseSeconds = it }, Modifier.weight(1f), singleLine = true, label = { Text("every, s") })
-            OutlinedTextField(lapseMinutes, { lapseMinutes = it }, Modifier.weight(1f), singleLine = true, label = { Text("for, min (0 = no end)") })
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button({ lapseRunning = !lapseRunning }) { Text(if (lapseRunning) "Stop frames" else "Save frames") }
-            if (lapseRunning || lapseSaved > 0) Text("$lapseSaved saved")
-        }
-        // the scope's own timelapse: an mp4 on its storage, no HUD
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({
-                val minutes = (lapseMinutes.toDoubleOrNull() ?: 0.0).let { if (it > 0) Math.round(it).toInt() else -1 }
-                val every = Math.round(lapseSeconds.toDoubleOrNull() ?: 5.0).toInt().coerceAtLeast(1)
-                link.send("start_record_avi", JSONObject().put("raw", false)
-                    .put("timelapse", JSONObject().put("enable", true).put("delay_sec", every).put("src_dura_min", minutes)))
-            }) { Text("Record on scope") }
-            Button({ link.send("stop_record_avi") }) { Text("Stop recording") }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button({ link.send("scope_move_to_horizon") }) { Text("Open") }
-            Button({ link.send("scope_park") }) { Text("Park") }
-            Checkbox(link.tracking, { link.send("scope_set_track_state", it) })
-            Text("tracking")
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // right-hand action column
+        Column(
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 84.dp, end = 8.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             StarMenu(link, catalog, site) { gps.utcMillis() }
-            Button({ link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }) { Text("Scenery") }
+            OverlayButton("Scenery") { link.send("iscope_start_view", JSONObject().put("mode", "scenery")) }
             SolarMenu(link, site) { gps.utcMillis() }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ link.send("iscope_stop_view", JSONObject()) }) { Text("Stop view") }
-            Button({ link.send("scope_move", JSONArray().put("none")) }) { Text("Cancel move") }
+            OverlayButton("Stop view") { link.send("iscope_stop_view", JSONObject()) }
+            OverlayButton("Open") { link.send("scope_move_to_horizon") }
+            OverlayButton("Park") { link.send("scope_park") }
+            OverlayButton(if (joystickOn) "Hide stick" else "Joystick") { joystickOn = !joystickOn }
         }
 
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Pad("Up", SLEW_UP) { held = it }
-            Row(horizontalArrangement = Arrangement.spacedBy(88.dp)) {
-                Pad("Left", SLEW_LEFT) { held = it }
-                Pad("Right", SLEW_RIGHT) { held = it }
+        // HUD data block
+        if (hud) {
+            Text(
+                lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, color = Color.White,
+                modifier = Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(start = 8.dp, bottom = 132.dp)
+                    .background(Color(0xA5000000)).padding(4.dp),
+            )
+        }
+
+        if (joystickOn) {
+            JoystickPanel(
+                fast, { fast = it }, link.tracking, { link.send("scope_set_track_state", it) }, { joy = it },
+                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 12.dp, bottom = 200.dp),
+            )
+        }
+
+        // capture modes and shutter
+        Column(
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(Modifier.background(Color(0x88000000), RoundedCornerShape(20.dp)).padding(4.dp)) {
+                listOf("Time-lapse", "Photo", "Video").forEachIndexed { i, label ->
+                    Box(
+                        Modifier.background(if (captureMode == i) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(16.dp))
+                            .clickable { captureMode = i }.padding(horizontal = 14.dp, vertical = 6.dp),
+                    ) { Text(label, color = Color.White, fontSize = 13.sp) }
+                }
             }
-            Pad("Down", SLEW_DOWN) { held = it }
-        }
-        Text("slew speed ${speed.toInt()} %")
-        Slider(speed, { speed = it }, valueRange = 1f..100f)
-        Text(link.lastReply)
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
-            Text("Level", style = MaterialTheme.typography.titleMedium)
-        }
-        if (showLevel) LevelPanel(link)
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(showStarlog, { showStarlog = it })
-            Text("Starlog", style = MaterialTheme.typography.titleMedium)
-            if (starlog.log != null) Text("  logging, ${starlog.crossings.size} crossings", style = MaterialTheme.typography.bodySmall)
-        }
-        if (showStarlog) StarlogPanel(starlog, link, gps, site)
-
-        Text("Go to object", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("M 31, NGC 7000, Orion Nebula") })
-        for (o in catalog.search(query, 6)) {
-            Button({
-                // the scope expects coordinates of date, the catalogue is J2000
-                val (ra, dec) = precessFromJ2000(o.raHours, o.decDeg, julianDateNow())
-                link.send("iscope_start_view", JSONObject().put("mode", "star").put("selected_cam", "View")
-                    .put("target_name", o.alias.ifEmpty { o.name }).put("target_ra_dec", JSONArray().put(ra).put(dec)).put("lp_filter", false))
-                query = ""
-            }, Modifier.fillMaxWidth()) { Text("${o.name} ${o.alias}  ${o.kind}  mag ${o.mag.ifEmpty { "?" }}") }
-        }
-
-        Text("JSON output", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(telemetry, { telemetry = it; link.telemetryTarget = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("UDP host:port (empty = off)") })
-
-        Text("Settings", style = MaterialTheme.typography.titleMedium)
-        for ((key, on) in link.settings) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(on, { link.send("set_setting", JSONObject().put(key, it)) })
-                Text(key)
-            }
-        }
-        Text("Stack options", style = MaterialTheme.typography.titleMedium)
-        for ((key, on) in link.stackSettings) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(on, { link.send("set_setting", JSONObject().put("stack", JSONObject().put(key, it))) })
-                Text(key)
+            val busy = (captureMode == 2 && recorder != null) || (captureMode == 0 && lapseRunning)
+            Box(
+                Modifier.size(70.dp).background(Color.White, CircleShape).padding(5.dp)
+                    .background(if (busy) Color(0xFFE53935) else Color(0xFFFFFFFF), CircleShape)
+                    .clickable {
+                        when (captureMode) {
+                            0 -> lapseRunning = !lapseRunning
+                            1 -> note = runCatching { snapshot("snap_")?.let { "saved Pictures/StarDeck/$it" } ?: "no video yet: start a view" }.getOrElse { "save failed: ${it.message}" }
+                            else -> toggleRecording()
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!busy) Box(Modifier.size(54.dp).background(if (captureMode == 2) Color(0xFFE53935) else Color(0xFFDDDDDD), CircleShape))
+                else Box(Modifier.size(24.dp).background(Color.White, RoundedCornerShape(4.dp)))
             }
         }
-        Text("Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0", style = MaterialTheme.typography.bodySmall)
+
+        // settings
+        TextButton(
+            { sheetOpen = true },
+            Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(start = 8.dp, bottom = 24.dp)
+                .background(Color(0x88000000), RoundedCornerShape(20.dp)),
+        ) { Text("Settings", color = Color.White) }
+    }
+
+    if (sheetOpen) {
+        ModalBottomSheet({ sheetOpen = false }) {
+            Column(
+                Modifier.padding(horizontal = 16.dp).padding(bottom = 32.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(host, { host = it }, Modifier.weight(1f), singleLine = true, label = { Text("Host or IP") })
+                    Button({ if (link.connected) link.disconnect() else link.connect(host.trim()) }) {
+                        Text(if (link.connected) "Disconnect" else "Connect")
+                    }
+                }
+                Text(link.status)
+
+                // GPS lock indicator and sync
+                val fix = gps.fix
+                val gpsText = when {
+                    !gpsGranted -> "GPS: permission not granted"
+                    fix == null -> "GPS: no fix yet (${gps.satellitesSeen} satellites in view)"
+                    !gps.locked() -> "GPS: fix lost (${gps.satellitesSeen} satellites in view)"
+                    else -> "GPS: LOCKED  ±%.0f m  %d of %d satellites".format(fix.accuracy, gps.satellitesUsed, gps.satellitesSeen)
+                }
+                Text(gpsText, color = if (gpsGranted && gps.locked()) Color(0xFF7CFC8A) else Color(0xFFFFB74D))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!gpsGranted) Button({ askGps.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) { Text("Allow GPS") }
+                    Button({ link.syncGps(gps) }, enabled = link.connected && gps.locked()) { Text("Send GPS to scope") }
+                }
+                if (link.scopeLocation.isNotEmpty()) Text("scope has ${link.scopeLocation}", style = MaterialTheme.typography.bodySmall)
+
+                Text("Display", style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(hud, { hud = it }); Text("HUD")
+                    Checkbox(flipH, { flipH = it }); Text("flip H")
+                    Checkbox(flipV, { flipV = it }); Text("flip V")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(Prefs.dms, { Prefs.dms = it; savePrefs() }); Text("angles in DMS (off: decimal degrees)")
+                }
+                Text(if (hud) "Recordings and snapshots carry the HUD." else "HUD off: recordings and snapshots are the plain picture.", style = MaterialTheme.typography.bodySmall)
+
+                Text("Shutter", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(shutterMs, { shutterMs = it }, Modifier.weight(1f), singleLine = true, label = { Text("exposure, ms (0.03 to 1000)") })
+                    Button({
+                        shutterMs.toDoubleOrNull()?.let {
+                            link.send("set_setting", JSONObject().put("manual_exp", true))
+                            link.send("set_setting", JSONObject().put("isp_exp_ms", it))
+                        }
+                    }) { Text("Set") }
+                    Button({ link.send("set_setting", JSONObject().put("manual_exp", false)) }) { Text("Auto") }
+                }
+
+                Text("Time-lapse", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(lapseSeconds, { lapseSeconds = it }, Modifier.weight(1f), singleLine = true, label = { Text("every, s") })
+                    OutlinedTextField(lapseMinutes, { lapseMinutes = it }, Modifier.weight(1f), singleLine = true, label = { Text("for, min (0 = no end)") })
+                }
+                Text("The shutter in Time-lapse mode saves frames on the phone. The scope can also record its own:", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button({
+                        val minutes = (lapseMinutes.toDoubleOrNull() ?: 0.0).let { if (it > 0) Math.round(it).toInt() else -1 }
+                        val every = Math.round(lapseSeconds.toDoubleOrNull() ?: 5.0).toInt().coerceAtLeast(1)
+                        link.send("start_record_avi", JSONObject().put("raw", false)
+                            .put("timelapse", JSONObject().put("enable", true).put("delay_sec", every).put("src_dura_min", minutes)))
+                    }) { Text("Record on scope") }
+                    Button({ link.send("stop_record_avi") }) { Text("Stop recording") }
+                }
+
+                Text("Mount", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button({ link.send("scope_move", JSONArray().put("none")) }) { Text("Cancel move") }
+                    Checkbox(link.tracking, { link.send("scope_set_track_state", it) })
+                    Text("tracking")
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(showLevel, { showLevel = it; link.levelOpen = it })
+                    Text("Level", style = MaterialTheme.typography.titleMedium)
+                }
+                if (showLevel) LevelPanel(link)
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(showStarlog, { showStarlog = it })
+                    Text("Starlog", style = MaterialTheme.typography.titleMedium)
+                    if (starlog.log != null) Text("  logging, ${starlog.crossings.size} crossings", style = MaterialTheme.typography.bodySmall)
+                }
+                if (showStarlog) StarlogPanel(starlog, link, gps, site)
+
+                Text("Go to object", style = MaterialTheme.typography.titleMedium)
+                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("M 31, NGC 7000, Orion Nebula") })
+                for (o in catalog.search(query, 6)) {
+                    Button({
+                        // the scope expects coordinates of date, the catalogue is J2000
+                        val (ra, dec) = precessFromJ2000(o.raHours, o.decDeg, julianDateNow())
+                        link.send("iscope_start_view", JSONObject().put("mode", "star").put("selected_cam", "View")
+                            .put("target_name", o.alias.ifEmpty { o.name }).put("target_ra_dec", JSONArray().put(ra).put(dec)).put("lp_filter", false))
+                        query = ""
+                    }, Modifier.fillMaxWidth()) { Text("${o.name} ${o.alias}  ${o.kind}  mag ${o.mag.ifEmpty { "?" }}") }
+                }
+
+                Text("JSON output", style = MaterialTheme.typography.titleMedium)
+                OutlinedTextField(telemetry, { telemetry = it; link.telemetryTarget = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("UDP host:port (empty = off)") })
+
+                Text("Settings", style = MaterialTheme.typography.titleMedium)
+                for ((key, on) in link.settings) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(on, { link.send("set_setting", JSONObject().put(key, it)) })
+                        Text(key)
+                    }
+                }
+                Text("Stack options", style = MaterialTheme.typography.titleMedium)
+                for ((key, on) in link.stackSettings) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(on, { link.send("set_setting", JSONObject().put("stack", JSONObject().put(key, it))) })
+                        Text(key)
+                    }
+                }
+                Text("Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0", style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
-/** A direction button that reports its angle while pressed and null on release. */
+/** A small translucent button for the controls laid over the video. */
 @Composable
-fun Pad(label: String, angle: Int, onHeld: (Int?) -> Unit) {
+fun OverlayButton(label: String, onClick: () -> Unit) {
     Box(
-        Modifier.size(80.dp, 56.dp)
-            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp))
-            .pointerInput(angle) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false).consume()
-                    onHeld(angle)
-                    // consume every move so the scrolling column cannot take the gesture over
-                    do {
-                        val event = awaitPointerEvent()
-                        event.changes.forEach { it.consume() }
-                    } while (event.changes.any { it.pressed })
-                    onHeld(null)
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) { Text(label) }
+        Modifier.background(Color(0x99000000), RoundedCornerShape(16.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
+    ) { Text(label, color = Color.White, fontSize = 13.sp) }
 }
 
 @Composable
