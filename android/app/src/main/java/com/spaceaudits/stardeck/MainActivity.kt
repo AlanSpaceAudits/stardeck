@@ -801,6 +801,13 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                         Button({ FieldWifi.leave(context) }) { Text("Leave") }
                     }
                     if (FieldWifi.status.isNotEmpty()) Text(FieldWifi.status)
+                    Text("Or find the Seestar over Bluetooth; it hands over its hotspot name and password:", style = MaterialTheme.typography.bodySmall)
+                    BlePanel { ssid, password ->
+                        FieldWifi.ssid = ssid
+                        FieldWifi.password = password
+                        appPrefs.edit().putString("ap_ssid", ssid).putString("ap_password", password).apply()
+                        joinField()
+                    }
                 }
                 Section("Network (home Wi-Fi)", showNetwork, { showNetwork = it }) { NetworkPanel(link) }
                 Section("Plan", showPlan, { showPlan = it }) { PlanPanel(link, catalog) }
