@@ -26,9 +26,11 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e CARGO_HOME=/src/seest
 stage=dist/stage
 mkdir -p $stage/stardeck-linux-x86_64 $stage/stardeck-windows-x86_64
 cp seestar_pc/target/portable/release/seestar_pc $stage/stardeck-linux-x86_64/stardeck
+cp seestar_pc/target/portable/release/stardeck_bridge $stage/stardeck-linux-x86_64/stardeck-bridge
 cp vendor_ffmpeg/ffmpeg scripts/install-linux.sh $stage/stardeck-linux-x86_64/
 cp scripts/README-pc.txt $stage/stardeck-linux-x86_64/README.txt
 cp seestar_pc/target/cross/x86_64-pc-windows-gnu/release/seestar_pc.exe $stage/stardeck-windows-x86_64/stardeck.exe
+cp seestar_pc/target/cross/x86_64-pc-windows-gnu/release/stardeck_bridge.exe $stage/stardeck-windows-x86_64/stardeck-bridge.exe
 cp vendor_ffmpeg/ffmpeg.exe $stage/stardeck-windows-x86_64/
 cp scripts/README-pc.txt $stage/stardeck-windows-x86_64/README.txt
 tar -C $stage -czf dist/stardeck-linux-x86_64.tar.gz stardeck-linux-x86_64

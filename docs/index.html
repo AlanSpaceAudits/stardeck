@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StarDeck Web</title>
+<meta name="description" content="Browser control for ZWO Seestar telescopes through the StarDeck bridge.">
+<style>
+  :root {
+    --bg: #000; --fg: #fff; --panel: rgba(16, 20, 24, 0.92); --chip: rgba(255, 255, 255, 0.18);
+    --chip-on: rgba(255, 255, 255, 0.45); --overlay: rgba(0, 0, 0, 0.34); --red: #ff3c3c; --ok: #7cfc8a; --warn: #ffb74d;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #000; } }
+  :root[data-theme="dark"] { --bg: #000; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+  button { font: inherit; color: var(--fg); background: var(--overlay); border: 0; border-radius: 16px; padding: 7px 12px; cursor: pointer; }
+  button:hover { background: rgba(0, 0, 0, 0.55); }
+  button.on { background: var(--chip-on); }
+  input, select { font: inherit; background: #1d2228; color: var(--fg); border: 1px solid #3a424b; border-radius: 8px; padding: 6px 8px; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  #pic { position: absolute; pointer-events: none; }
+  #reticle { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #hud { position: absolute; left: 6px; bottom: 6px; background: rgba(0, 0, 0, 0.65); padding: 4px 6px;
+    font: 12px/1.35 ui-monospace, "Cascadia Mono", Menlo, monospace; white-space: pre; pointer-events: none; }
+  #top { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 12px;
+    padding: 8px 12px; background: rgba(0, 0, 0, 0.53); }
+  #top .grow { flex: 1; }
+  #status { font-size: 12px; padding: 2px 12px 6px; position: fixed; top: 44px; left: 0; color: #ddd; }
+  #controls { position: fixed; top: 76px; right: 10px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+    max-height: calc(100% - 260px); overflow-y: auto; }
+  #controls .items { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  [hidden] { display: none !important; }
+  #capture { position: fixed; left: 50%; transform: translateX(-50%); bottom: 90px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  #modes { background: var(--overlay); border-radius: 18px; padding: 3px; display: flex; gap: 2px; }
+  #modes button { background: transparent; }
+  #modes button.on { background: var(--chip-on); }
+  #shutter { width: 64px; height: 64px; border-radius: 50%; background: #fff; padding: 5px; }
+  #shutter span { display: block; width: 100%; height: 100%; border-radius: 50%; background: #ddd; }
+  #shutter.video span { background: #e53935; }
+  #shutter.busy span { width: 22px; height: 22px; margin: auto; border-radius: 4px; background: #e53935; transform: translateY(16px); }
+  .card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(360px, calc(100% - 24px));
+    max-height: calc(100% - 120px); overflow-y: auto; background: var(--panel); border-radius: 16px; padding: 14px; display: none; }
+  .card.open { display: block; }
+  .card h3 { margin: 0 0 8px; font-size: 16px; display: flex; justify-content: space-between; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+  .chips button { background: var(--chip); border-radius: 12px; padding: 5px 10px; font-size: 13px; }
+  .chips button.on { background: var(--chip-on); }
+  .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+  .small { font-size: 12px; color: #ccc; }
+  .mono { font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  input[type=range] { width: 100%; }
+  #joy { position: fixed; left: 10px; bottom: 120px; width: 144px; background: rgba(0, 0, 0, 0.55); border-radius: 20px; padding: 4px;
+    touch-action: none; user-select: none; }
+  #joy .grip { display: flex; justify-content: space-between; align-items: center; font-size: 11px; padding: 3px 8px; cursor: move; }
+  #joy .speed { display: flex; justify-content: center; gap: 2px; margin: 2px 0; }
+  #joy .speed button { font-size: 12px; padding: 3px 10px; background: transparent; }
+  #joy .speed button.on { background: var(--chip-on); }
+  #stick { width: 136px; height: 136px; display: block; margin: 0 auto; touch-action: none; }
+  #joy .track { display: block; margin: 4px auto; font-size: 12px; }
+  #joy.folded { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: move; }
+  #list { max-height: 50vh; overflow-y: auto; }
+  #list button { display: block; width: 100%; text-align: left; margin: 3px 0; background: var(--chip); border-radius: 10px; font-size: 13px; }
+  #hint { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); text-align: center; max-width: 420px; padding: 20px;
+    background: var(--panel); border-radius: 16px; display: none; line-height: 1.45; }
+  #hint code { background: #222; padding: 1px 5px; border-radius: 4px; }
+  @media (max-width: 480px) { #capture { bottom: 80px; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <img id="video" alt="" crossorigin="anonymous">
+  <div id="pic"><canvas id="reticle"></canvas><div id="hud"></div></div>
+</div>
+
+<div id="top">
+  <strong>StarDeck</strong><span class="grow"></span>
+  <span id="battery" class="small"></span>
+  <button id="settingsBtn" title="Settings">☰</button>
+</div>
+<div id="status">connecting…</div>
+
+<div id="hint">
+  <p><strong>Start the StarDeck bridge on this computer.</strong></p>
+  <p>Download StarDeck for your PC from the <a href="https://github.com/AlanSpaceAudits/stardeck/releases/latest" style="color:#90caf9">latest release</a>,
+  run <code>stardeck-bridge</code> (Windows: <code>stardeck-bridge.exe</code>), and keep it open.</p>
+  <p class="small">The bridge talks to the Seestar on your network or its hotspot. This page talks to the bridge at the address under ☰ Settings.
+  If your browser asks to let this page reach devices on your local network, allow it, or open <code>http://127.0.0.1:4791/</code> instead.</p>
+</div>
+
+<div id="controls">
+  <button id="controlsBtn">Controls ▾</button>
+  <div class="items" id="items" hidden>
+    <button data-open="starCard">Star ▾</button>
+    <button id="sceneryBtn">Scenery</button>
+    <button data-open="solarCard">Solar ▾</button>
+    <button id="stopViewBtn">Stop view</button>
+    <button id="openBtn">Open</button>
+    <button id="parkBtn">Park</button>
+    <button id="trackBtn">Tracking off</button>
+    <button data-open="adjustCard">Exposure</button>
+    <button id="zoomBtn">Zoom 1x</button>
+    <button data-open="reticleCard">Reticle</button>
+    <button id="joyBtn">Hide stick</button>
+  </div>
+</div>
+
+<div id="capture" hidden>
+  <div id="modes"><button data-mode="photo" class="on">Photo</button><button data-mode="video">Video</button></div>
+  <button id="shutter" title="Shutter"><span></span></button>
+</div>
+
+<div id="joy">
+  <div class="grip"><span>⠿ move</span><span><button id="foldBtn" style="padding:0 6px">–</button></span></div>
+  <div class="speed"><button data-speed="0">Slow</button><button data-speed="1" class="on">Fast</button></div>
+  <canvas id="stick" width="272" height="272"></canvas>
+  <button class="track" id="joyTrackBtn">Tracking off</button>
+</div>
+
+<div class="card" id="starCard">
+  <h3>Star view <button data-close>✕</button></h3>
+  <button id="starHere">Star view at the current position</button>
+  <p class="small">Messier objects above 15°, highest first. Tap one to go there.</p>
+  <div id="list"></div>
+</div>
+
+<div class="card" id="solarCard">
+  <h3>Solar system <button data-close>✕</button></h3>
+  <button id="solarHere">Solar view at the current position</button>
+  <div class="row"><label><input type="checkbox" id="filterOn"> solar filter is fitted</label></div>
+  <div class="row"><button id="sunBtn" disabled>Sun</button><button id="moonBtn">Moon</button></div>
+  <p class="small">Do not point the telescope at the Sun without the solar filter.</p>
+</div>
+
+<div class="card" id="adjustCard">
+  <h3>Exposure <button data-close>✕</button></h3>
+  <div class="chips"><button data-exp="auto" class="on">Auto</button><button data-exp="manual">Manual</button></div>
+  <div id="autoBox">
+    <div class="row">Brightness <span id="biasVal">0</span> <button id="biasReset">Reset</button></div>
+    <input type="range" id="bias" min="-100" max="100" value="0">
+  </div>
+  <div id="manualBox" hidden>
+    <div class="row">Exposure <span id="expVal"></span></div>
+    <input type="range" id="exp" min="0" max="1000" value="500">
+    <div class="row">Gain <span id="gainVal">80</span></div>
+    <input type="range" id="gain" min="0" max="400" value="80">
+  </div>
+</div>
+
+<div class="card" id="reticleCard">
+  <h3>Reticle <button data-close>✕</button></h3>
+  <div class="chips" id="shapes"></div>
+  <div class="row">Size <strong id="sizeVal"></strong></div>
+  <div class="chips" id="sizes"></div>
+  <div class="row">
+    <input id="customSize" size="7" placeholder="custom">
+    <span class="chips"><button id="unitSec" class="on">″</button><button id="unitMin">′</button></span>
+    <button id="customSet">Set</button>
+  </div>
+  <div class="row"><label><input type="checkbox" id="rings"> rings at 2× and 3×</label></div>
+  <div class="row"><label><input type="checkbox" id="retLabel" checked> size and crossing time on the HUD</label></div>
+  <div class="mono" id="fov"></div>
+  <div class="small" id="crossing"></div>
+  <div class="row"><button id="timerBtn">Start timing</button><span class="mono" id="timerVal"></span><button id="lapsClear">Clear</button></div>
+  <div class="mono" id="laps"></div>
+</div>
+
+<div class="card" id="settingsCard">
+  <h3>Settings <button data-close>✕</button></h3>
+  <div class="row">Bridge <input id="bridge" size="22"> <button id="reconnect">Connect</button></div>
+  <p class="small">The computer running <code>stardeck-bridge</code>. Use <code>127.0.0.1:4791</code> on that computer.
+    From a phone or tablet, run the bridge with <code>--lan</code> and enter the computer's address.</p>
+  <div class="row"><label><input type="checkbox" id="dms"> angles in degrees, minutes, seconds</label></div>
+  <div class="row"><label><input type="checkbox" id="hudOn" checked> HUD data block</label></div>
+  <div class="row"><label><input type="checkbox" id="flipH"> flip H</label><label><input type="checkbox" id="flipV"> flip V</label></div>
+  <div class="row"><label>Storage
+    <select id="storage"><option value="both">Seestar and this computer</option><option value="seestar">Seestar only</option><option value="local">This computer only</option></select></label></div>
+  <p class="small">The Seestar keeps its full-size picture. This computer keeps a copy with the HUD burned in (PNG, or WebM for video).</p>
+  <div class="mono" id="device"></div>
+  <p class="small">Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0. Source: <a style="color:#90caf9" href="https://github.com/AlanSpaceAudits/stardeck">github.com/AlanSpaceAudits/stardeck</a></p>
+</div>
+
+<script src="messier.js"></script>
+<script>
+"use strict";
+// ---------- preferences ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("stardeck." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("stardeck." + k, JSON.stringify(v)); } catch {} },
+};
+const $ = (id) => document.getElementById(id);
+const prefs = {
+  bridge: store.get("bridge", location.protocol === "http:" && location.port ? location.host : "127.0.0.1:4791"),
+  dms: store.get("dms", false), hud: store.get("hud", true), flipH: store.get("flipH", false), flipV: store.get("flipV", false),
+  storage: store.get("storage", "both"), shape: store.get("shape", 1), size: store.get("size", 600),
+  rings: store.get("rings", false), retLabel: store.get("retLabel", true), joy: store.get("joy", null), joyFolded: store.get("joyFolded", false),
+  controlsOpen: store.get("controlsOpen", false),
+};
+function save() { for (const k in prefs) store.set(k, prefs[k]); }
+
+// ---------- formatting ----------
+function fmtDeg(v, signed = true, digits = 4) {
+  if (v == null || isNaN(v)) return "--";
+  if (!prefs.dms) return (signed && v >= 0 ? "+" : "") + v.toFixed(digits) + "°";
+  const sign = v < 0 ? "-" : (signed ? "+" : "");
+  let s = Math.abs(v) * 3600; const d = Math.floor(s / 3600); s -= d * 3600; const m = Math.floor(s / 60); s -= m * 60;
+  return `${sign}${d}°${String(m).padStart(2, "0")}′${s.toFixed(1).padStart(4, "0")}″`;
+}
+function fmtArcsec(a) { return a >= 3600 ? (a / 3600).toFixed(2) + "°" : a >= 60 ? (a / 60).toFixed(2) + "′" : a.toFixed(1) + "″"; }
+const utcText = (ms) => new Date(ms).toISOString().replace("T", " ").replace("Z", "");
+
+// ---------- astronomy (same formulas as the apps) ----------
+const JD = (ms) => ms / 86400000 + 2440587.5;
+// Meeus, J. (1998). Astronomical Algorithms (2nd ed.), ch. 21, eq. 21.2 and 21.4.
+function precess(raH, decD, jd) {
+  const t = (jd - 2451545) / 36525, as = (a) => (a / 3600) * Math.PI / 180;
+  const zeta = as(2306.2181 * t + 0.30188 * t * t + 0.017998 * t ** 3), z = as(2306.2181 * t + 1.09468 * t * t + 0.018203 * t ** 3);
+  const th = as(2004.3109 * t - 0.42665 * t * t - 0.041833 * t ** 3);
+  const ra = raH * 15 * Math.PI / 180, dec = decD * Math.PI / 180;
+  const A = Math.cos(dec) * Math.sin(ra + zeta), B = Math.cos(th) * Math.cos(dec) * Math.cos(ra + zeta) - Math.sin(th) * Math.sin(dec);
+  const C = Math.sin(th) * Math.cos(dec) * Math.cos(ra + zeta) + Math.cos(th) * Math.sin(dec);
+  return [((((Math.atan2(A, B) + z) * 180 / Math.PI) % 360 + 360) % 360) / 15, Math.asin(C) * 180 / Math.PI];
+}
+// Meeus, ch. 12, eq. 12.4
+function gmstDeg(jd) { const t = (jd - 2451545) / 36525; return ((280.46061837 + 360.98564736629 * (jd - 2451545) + 0.000387933 * t * t - t ** 3 / 38710000) % 360 + 360) % 360; }
+function altitude(raH, decD, jd, lat, lonE) {
+  const H = (gmstDeg(jd) + lonE - raH * 15) * Math.PI / 180, d = decD * Math.PI / 180, p = lat * Math.PI / 180;
+  return Math.asin(Math.sin(p) * Math.sin(d) + Math.cos(p) * Math.cos(d) * Math.cos(H)) * 180 / Math.PI;
+}
+const ARCSEC_PER_RAD = 206264.806;
+// 360° per sidereal day of 86164.0905 s (Urban & Seidelmann, 2013, Explanatory Supplement, 3rd ed., sec. 3.6)
+const SIDEREAL_ARCSEC_PER_S = 360 * 3600 / 86164.0905;
+const crossingSeconds = (size, dec) => size / (SIDEREAL_ARCSEC_PER_S * Math.abs(Math.cos(dec * Math.PI / 180)));
+
+// ---------- bridge connection: one socket for commands, one for status ----------
+const state = { pointing: null, battery: "", site: null, setting: null, camera: null, focal: null, connected: false, tracking: false };
+function makeSocket(onOpen) {
+  const ws = new WebSocket(`ws://${prefs.bridge}/ws`);
+  const pending = new Map(); let cid = 0;
+  ws.onmessage = (m) => {
+    const msg = JSON.parse(m.data);
+    if (msg.error) { status(msg.error); return; }
+    if (msg.connected) { onOpen && onOpen(); return; }
+    if (msg.cid != null && pending.has(msg.cid)) { pending.get(msg.cid)(msg.reply); pending.delete(msg.cid); }
+  };
+  ws.onclose = () => { state.connected = false; status("bridge not reachable at " + prefs.bridge); showHint(true); pending.forEach((r) => r(null)); pending.clear(); };
+  ws.onerror = () => {};
+  return {
+    ws,
+    call(method, params) {
+      return new Promise((resolve) => {
+        if (ws.readyState !== 1) return resolve(null);
+        const id = ++cid; pending.set(id, resolve);
+        ws.send(JSON.stringify(params === undefined ? { cid: id, method } : { cid: id, method, params }));
+      });
+    },
+  };
+}
+let cmd = null, poll = null, pollTimer = null;
+function status(t) { $("status").textContent = t; }
+function showHint(on) { $("hint").style.display = on ? "block" : "none"; }
+function connect() {
+  try { cmd && cmd.ws.close(); poll && poll.ws.close(); } catch {}
+  clearInterval(pollTimer);
+  status("connecting to the bridge at " + prefs.bridge + "…");
+  cmd = makeSocket(() => { state.connected = true; showHint(false); status("connected"); startVideo(); });
+  poll = makeSocket(() => { pollTimer = setInterval(pollOnce, 500); refreshDevice(); });
+}
+let lastDevice = 0;
+async function pollOnce() {
+  const r = await poll.call("scope_get_state");
+  if (r && r.result && r.result.alt != null) state.pointing = r.result;
+  const t = await poll.call("scope_get_track_state");
+  if (t && typeof t.result === "boolean") { state.tracking = t.result; showTracking(); }
+  if (Date.now() - lastDevice > 10000) refreshDevice();
+  drawHud();
+}
+async function refreshDevice() {
+  lastDevice = Date.now();
+  const r = await poll.call("get_device_state", { keys: ["setting", "location_lon_lat", "pi_status", "camera", "device", "ap"] });
+  const s = r && r.result; if (!s) return;
+  state.setting = s.setting || null;
+  if (s.location_lon_lat) state.site = { lat: s.location_lon_lat[1], lon: s.location_lon_lat[0] };
+  if (s.pi_status) state.battery = s.pi_status.battery_capacity + "%" + (s.pi_status.charge_online ? " ⚡" : "");
+  if (s.camera) state.camera = s.camera;
+  if (s.device && s.device.focal_len) state.focal = s.device.focal_len;
+  $("battery").textContent = state.battery;
+  $("device").textContent = [
+    s.device ? `${s.device.product_model || ""}  firmware ${s.device.firmware_ver_string || "?"}` : "",
+    s.ap ? `Hotspot ${s.ap.ssid}  password ${s.ap.passwd}` : "",
+  ].filter(Boolean).join("\n");
+  updateReticleCard();
+}
+
+// ---------- video ----------
+function startVideo() { $("video").src = `http://${prefs.bridge}/video?t=${Date.now()}`; }
+$("video").addEventListener("load", layout);
+$("video").addEventListener("error", () => setTimeout(() => state.connected && startVideo(), 3000));
+let frames = 0, fps = null;
+function layout() {
+  const v = $("video"), r = v.getBoundingClientRect(), pic = $("pic");
+  Object.assign(pic.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+  const c = $("reticle"); c.width = r.width * devicePixelRatio; c.height = r.height * devicePixelRatio;
+  v.style.transform = `scale(${prefs.flipH ? -1 : 1}, ${prefs.flipV ? -1 : 1})`;
+  drawReticle();
+}
+window.addEventListener("resize", layout);
+setInterval(layout, 1000);
+
+// ---------- reticle ----------
+let zoom = 0;
+function arcsecPerVideoPx() {
+  const cam = state.camera, v = $("video");
+  if (!cam || !state.focal || !cam.pixel_size_um || !cam.chip_size || !v.naturalWidth) return null;
+  return ARCSEC_PER_RAD * (cam.pixel_size_um / 1000) / state.focal * cam.chip_size[0] / v.naturalWidth / [1, 2, 4][zoom];
+}
+function reticleShapes(w, h, pxPerArcsec, draw) {
+  const shape = prefs.shape; if (shape === 0) return;
+  const cx = w / 2, cy = h / 2, arm = Math.min(w, h) / 12, gap = Math.min(w, h) / 60;
+  if (shape === 1 || shape === 4 || pxPerArcsec == null) {
+    draw("line", cx - arm, cy, cx - gap, cy); draw("line", cx + gap, cy, cx + arm, cy);
+    draw("line", cx, cy - arm, cx, cy - gap); draw("line", cx, cy + gap, cx, cy + arm);
+  }
+  if (pxPerArcsec == null) return;
+  const size = prefs.size * pxPerArcsec;
+  for (const k of prefs.rings ? [1, 2, 3] : [1]) {
+    if (shape === 2 || shape === 4) draw("circle", cx, cy, size * k / 2);
+    if (shape === 3) draw("box", cx, cy, size * k / 2);
+  }
+}
+function paintReticle(ctx, w, h, pxPerArcsec, lw) {
+  ctx.strokeStyle = "#ff3c3c"; ctx.lineWidth = lw;
+  reticleShapes(w, h, pxPerArcsec, (k, a, b, c, d) => {
+    ctx.beginPath();
+    if (k === "line") { ctx.moveTo(a, b); ctx.lineTo(c, d); }
+    if (k === "circle") ctx.arc(a, b, c, 0, Math.PI * 2);
+    if (k === "box") ctx.rect(a - c, b - c, 2 * c, 2 * c);
+    ctx.stroke();
+  });
+}
+function drawReticle() {
+  const c = $("reticle"), ctx = c.getContext("2d"), v = $("video"), a = arcsecPerVideoPx();
+  ctx.clearRect(0, 0, c.width, c.height);
+  paintReticle(ctx, c.width, c.height, a && v.naturalWidth ? c.width / v.naturalWidth / a : null, 2.5 * devicePixelRatio);
+}
+
+// ---------- HUD ----------
+function hudLines() {
+  const p = state.pointing || {}, s = state.site, sized = [2, 3, 4].includes(prefs.shape);
+  const lines = [];
+  if (prefs.retLabel && sized) lines.push(`Reticle ${fmtArcsec(prefs.size)}` + (p.dec != null ? `  crossing ${crossingSeconds(prefs.size, p.dec).toFixed(2)} s` : ""));
+  lines.push(`Az ${fmtDeg(p.az, false)}  El ${fmtDeg(p.alt)}`);
+  lines.push(s ? `Lat ${fmtDeg(s.lat, true, 5)}  Lon ${fmtDeg(s.lon, true, 5)}` : "Lat --  Lon --");
+  lines.push(`${utcText(Date.now())} UTC` + (fps ? `  ${fps.toFixed(1)} fps` : ""));
+  return lines;
+}
+function drawHud() { $("hud").style.display = prefs.hud ? "block" : "none"; $("hud").textContent = hudLines().join("\n"); }
+setInterval(drawHud, 100);
+
+// ---------- controls ----------
+const send = (m, p) => cmd && cmd.call(m, p).then((r) => { if (r && r.code) status(`${m}: ${r.error || "code " + r.code}`); return r; });
+function setControls(open) { prefs.controlsOpen = open; save(); $("items").hidden = !open; $("capture").hidden = !open && !recording;
+  $("controlsBtn").textContent = open ? "Controls ▴" : "Controls ▾"; }
+$("controlsBtn").onclick = () => setControls(!prefs.controlsOpen);
+document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { $(b.dataset.open).classList.toggle("open"); if (b.dataset.open === "starCard") fillStars(); });
+document.querySelectorAll("[data-close]").forEach((b) => b.onclick = () => b.closest(".card").classList.remove("open"));
+$("settingsBtn").onclick = () => $("settingsCard").classList.toggle("open");
+$("sceneryBtn").onclick = () => send("iscope_start_view", { mode: "scenery" }).then(startVideo);
+$("stopViewBtn").onclick = () => send("iscope_stop_view", {});
+$("openBtn").onclick = () => send("scope_move_to_horizon");
+$("parkBtn").onclick = () => send("scope_park");
+function showTracking() { const t = state.tracking ? "Tracking on" : "Tracking off"; $("trackBtn").textContent = t; $("joyTrackBtn").textContent = t;
+  $("joyTrackBtn").classList.toggle("on", state.tracking); }
+$("trackBtn").onclick = $("joyTrackBtn").onclick = () => send("scope_set_track_state", !state.tracking);
+// the scope does not report rtsp_roi_index back, so the page keeps it
+$("zoomBtn").onclick = () => { zoom = (zoom + 1) % 3; $("zoomBtn").textContent = `Zoom ${[1, 2, 4][zoom]}x`; send("set_setting", { rtsp_roi_index: zoom }); drawReticle(); };
+$("joyBtn").onclick = () => { const j = $("joy"); j.hidden = !j.hidden; $("joyBtn").textContent = j.hidden ? "Joystick" : "Hide stick"; };
+
+// star and solar targets
+function fillStars() {
+  const now = Date.now(), jd = JD(now), list = $("list"); list.innerHTML = "";
+  const rows = MESSIER.map(([m, name, type, ra, dec, mag]) => {
+    const [r, d] = precess(ra, dec, jd);
+    const alt = state.site ? altitude(r, d, jd, state.site.lat, state.site.lon) : null;
+    return { m, name, type, mag, r, d, alt };
+  }).filter((o) => o.alt == null || o.alt > 15).sort((a, b) => (b.alt ?? 0) - (a.alt ?? 0));
+  for (const o of rows) {
+    const b = document.createElement("button");
+    b.textContent = `${o.m}  ${o.name}  ${o.type}  mag ${o.mag || "?"}` + (o.alt != null ? `  alt ${o.alt.toFixed(0)}°` : "");
+    b.onclick = () => { send("iscope_start_view", { mode: "star", selected_cam: "View", target_name: o.m, target_ra_dec: [o.r, o.d], lp_filter: false }); $("starCard").classList.remove("open"); };
+    list.appendChild(b);
+  }
+}
+$("starHere").onclick = () => send("iscope_start_view", { mode: "star" });
+$("solarHere").onclick = () => send("iscope_start_view", { mode: "solar_sys" }).then(startVideo);
+$("filterOn").onchange = (e) => $("sunBtn").disabled = !e.target.checked;
+$("sunBtn").onclick = () => send("iscope_start_view", { mode: "solar_sys", target_type: "sun", target_name: "Sun" }).then(startVideo);
+$("moonBtn").onclick = () => send("iscope_start_view", { mode: "solar_sys", target_type: "moon", target_name: "Moon" }).then(startVideo);
+
+// exposure (same controls as the official adjust panel)
+function expRange() { const r = state.setting && (state.setting.isp_range_exp_us_scenery || state.setting.isp_range_exp_us); return r ? [r[0] / 1000, r[1] / 1000] : [0.03, 1000]; }
+const expFromPos = (p) => { const [a, b] = expRange(); return a * Math.pow(b / a, p / 1000); };
+const fmtExp = (ms) => ms < 1 ? (ms * 1000).toFixed(0) + " µs" : ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms.toFixed(2) + " ms";
+document.querySelectorAll("[data-exp]").forEach((b) => b.onclick = () => {
+  const manual = b.dataset.exp === "manual";
+  document.querySelectorAll("[data-exp]").forEach((x) => x.classList.toggle("on", x === b));
+  $("autoBox").hidden = manual; $("manualBox").hidden = !manual;
+  send("set_setting", { manual_exp: manual });
+});
+$("bias").oninput = (e) => $("biasVal").textContent = e.target.value;
+$("bias").onchange = (e) => send("set_setting", { ae_bri_percent: 50 + e.target.value / 2 });
+$("biasReset").onclick = () => { $("bias").value = 0; $("biasVal").textContent = 0; send("set_setting", { ae_bri_percent: 50 }); };
+$("exp").oninput = (e) => $("expVal").textContent = fmtExp(expFromPos(+e.target.value));
+$("exp").onchange = (e) => send("set_setting", { isp_exp_ms: expFromPos(+e.target.value) });
+$("gain").oninput = (e) => $("gainVal").textContent = e.target.value;
+$("gain").onchange = (e) => send("set_setting", { isp_gain: +e.target.value });
+$("expVal").textContent = fmtExp(expFromPos(500));
+
+// reticle card
+const SHAPES = ["Off", "Cross", "Circle", "Box", "Cross + circle"], SIZES = [30, 60, 120, 300, 600, 900, 1200, 1800];
+let unitMin = false;
+function updateReticleCard() {
+  $("shapes").innerHTML = ""; SHAPES.forEach((n, i) => { const b = document.createElement("button"); b.textContent = n; b.classList.toggle("on", prefs.shape === i);
+    b.onclick = () => { prefs.shape = i; save(); updateReticleCard(); drawReticle(); }; $("shapes").appendChild(b); });
+  $("sizes").innerHTML = ""; SIZES.forEach((a) => { const b = document.createElement("button"); b.textContent = fmtArcsec(a); b.classList.toggle("on", prefs.size === a);
+    b.onclick = () => { prefs.size = a; save(); updateReticleCard(); drawReticle(); }; $("sizes").appendChild(b); });
+  $("sizeVal").textContent = fmtArcsec(prefs.size);
+  $("rings").checked = prefs.rings; $("retLabel").checked = prefs.retLabel;
+  const a = arcsecPerVideoPx(), v = $("video");
+  $("fov").textContent = a ? `Field ${fmtArcsec(v.naturalWidth * a)} × ${fmtArcsec(v.naturalHeight * a)}   ${a.toFixed(2)}″ per pixel` : "Waiting for the camera data and the video.";
+  const dec = state.pointing && state.pointing.dec;
+  $("crossing").textContent = dec != null ? `A star at Dec ${fmtDeg(dec)} crosses ${fmtArcsec(prefs.size)} in ${crossingSeconds(prefs.size, dec).toFixed(2)} s (pointing held still)` : "";
+}
+$("unitSec").onclick = () => { unitMin = false; $("unitSec").classList.add("on"); $("unitMin").classList.remove("on"); };
+$("unitMin").onclick = () => { unitMin = true; $("unitMin").classList.add("on"); $("unitSec").classList.remove("on"); };
+$("customSet").onclick = () => { const v = parseFloat($("customSize").value); if (v > 0) { prefs.size = unitMin ? v * 60 : v; save(); updateReticleCard(); drawReticle(); } };
+$("rings").onchange = (e) => { prefs.rings = e.target.checked; save(); drawReticle(); };
+$("retLabel").onchange = (e) => { prefs.retLabel = e.target.checked; save(); };
+let timerStart = null; const laps = [];
+$("timerBtn").onclick = () => {
+  const now = Date.now();
+  if (timerStart == null) { timerStart = now; $("timerBtn").textContent = "Stop"; return; }
+  const dec = state.pointing && state.pointing.dec;
+  laps.unshift(`${utcText(timerStart).slice(11)} UTC  ${((now - timerStart) / 1000).toFixed(2)} s over ${fmtArcsec(prefs.size)}` +
+    (dec != null ? `  (expected ${crossingSeconds(prefs.size, dec).toFixed(2)} s)` : ""));
+  timerStart = null; $("timerBtn").textContent = "Start timing"; $("laps").textContent = laps.slice(0, 8).join("\n");
+};
+$("lapsClear").onclick = () => { laps.length = 0; $("laps").textContent = ""; };
+setInterval(() => { $("timerVal").textContent = timerStart != null ? ((Date.now() - timerStart) / 1000).toFixed(2) + " s" : ""; }, 50);
+
+// ---------- capture: Seestar copy through the scope, HUD copy made in the browser ----------
+let mode = "photo", recording = false, recorder = null, recCanvas = null, recTimer = null, chunks = [];
+document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => {
+  if (recording) return;
+  mode = b.dataset.mode; document.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("on", x === b));
+  $("shutter").classList.toggle("video", mode === "video");
+});
+const onSeestar = () => prefs.storage !== "local", onLocal = () => prefs.storage !== "seestar";
+function composite(canvas) {
+  const v = $("video"), w = v.naturalWidth, h = v.naturalHeight; if (!w) return false;
+  canvas.width = w; canvas.height = h; const ctx = canvas.getContext("2d");
+  ctx.save(); ctx.translate(prefs.flipH ? w : 0, prefs.flipV ? h : 0); ctx.scale(prefs.flipH ? -1 : 1, prefs.flipV ? -1 : 1); ctx.drawImage(v, 0, 0); ctx.restore();
+  const a = arcsecPerVideoPx(); paintReticle(ctx, w, h, a ? 1 / a : null, Math.max(2, h / 400));
+  if (prefs.hud) {
+    const lines = hudLines(), size = Math.max(12, h / 45); ctx.font = `${size}px ui-monospace, Menlo, monospace`;
+    const lh = size * 1.25, pad = lh / 3, top = h - pad * 2 - lh * lines.length, tw = Math.max(...lines.map((l) => ctx.measureText(l).width));
+    ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(pad, top - pad, tw + pad * 2, h - top);
+    ctx.fillStyle = "#fff"; ctx.textBaseline = "top"; lines.forEach((l, i) => ctx.fillText(l, pad * 2, top + lh * i));
+  }
+  return true;
+}
+function download(blob, ext) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${Math.floor(Date.now() / 1000)}.${ext}`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+$("shutter").onclick = () => {
+  if (mode === "photo") {
+    if (onSeestar()) send("save_image");
+    if (onLocal()) { const c = document.createElement("canvas"); if (composite(c)) c.toBlob((b) => download(b, "png"), "image/png"); }
+    status("saved" + (onSeestar() ? " on the Seestar" : "") + (onLocal() ? " and downloaded the HUD copy" : ""));
+    return;
+  }
+  if (!recording) {
+    recording = true; $("shutter").classList.add("busy"); document.querySelectorAll("[data-mode]").forEach((x) => x.hidden = true);
+    if (onSeestar()) send("start_record_avi", { raw: false, timelapse: { enable: false, delay_sec: 0, src_dura_min: 0 } });
+    if (onLocal() && window.MediaRecorder) {
+      recCanvas = document.createElement("canvas"); composite(recCanvas); chunks = [];
+      recorder = new MediaRecorder(recCanvas.captureStream(15), { mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm" });
+      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      recorder.onstop = () => download(new Blob(chunks, { type: "video/webm" }), "webm");
+      recorder.start(1000); recTimer = setInterval(() => composite(recCanvas), 66);
+    }
+    status("recording");
+  } else {
+    recording = false; $("shutter").classList.remove("busy"); document.querySelectorAll("[data-mode]").forEach((x) => x.hidden = false);
+    if (onSeestar()) send("stop_record_avi");
+    if (recorder) { clearInterval(recTimer); recorder.stop(); recorder = null; }
+    status("saved" + (onSeestar() ? " on the Seestar" : ""));
+    setControls(prefs.controlsOpen);
+  }
+};
+// MJPEG in an <img> fires no event per frame; count frames by sampling the image
+let lastSample = null;
+setInterval(() => {
+  const v = $("video"); if (!v.naturalWidth) return;
+  try {
+    const c = document.createElement("canvas"); c.width = 8; c.height = 8; const x = c.getContext("2d"); x.drawImage(v, 0, 0, 8, 8);
+    const d = x.getImageData(0, 0, 8, 8).data.join(","); if (d !== lastSample) frames++; lastSample = d;
+  } catch { /* image not readable */ }
+}, 20);
+setInterval(() => { fps = frames || null; frames = 0; }, 1000);
+
+// ---------- joystick (same speed curve and directions as the apps) ----------
+function stickPercent(d) { return d < 1 ? 0 : d <= 5 ? 1 : d <= 40 ? 1 + Math.floor((d - 5) * 0.97) : d <= 90 ? 40 + Math.floor((d - 40) * 1.2) : 100; }
+let joy = null, fast = true, knob = [0, 0], slewTimer = null;
+function drawStick() {
+  const c = $("stick"), ctx = c.getContext("2d"), r = c.width / 2;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.fillStyle = "rgba(255,255,255,0.2)"; ctx.beginPath(); ctx.arc(r, r, r - 2, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 4; ctx.stroke();
+  ctx.fillStyle = joy ? "#ff5a5a" : "#fff"; ctx.beginPath(); ctx.arc(r + knob[0], r + knob[1], r * 0.311, 0, Math.PI * 2); ctx.fill();
+}
+function slewLoop() {
+  if (!joy) return;
+  send("scope_speed_move", { percent: joy[1], angle: joy[0], level: fast ? 1 : 0, dur_sec: 3 });
+}
+const stick = $("stick");
+stick.onpointerdown = (e) => { stick.setPointerCapture(e.pointerId); move(e); clearInterval(slewTimer); slewLoop(); slewTimer = setInterval(slewLoop, 200); };
+stick.onpointermove = (e) => { if (stick.hasPointerCapture(e.pointerId)) move(e); };
+stick.onpointerup = stick.onpointercancel = () => {
+  clearInterval(slewTimer); joy = null; knob = [0, 0]; drawStick();
+  send("scope_speed_move", { percent: 0, angle: 0, level: fast ? 1 : 0, dur_sec: 3 });
+};
+function move(e) {
+  const rect = stick.getBoundingClientRect(), r = rect.width / 2;
+  let dx = e.clientX - rect.left - r, dy = e.clientY - rect.top - r; const len = Math.hypot(dx, dy);
+  if (len > r) { dx *= r / len; dy *= r / len; }
+  const scale = stick.width / rect.width; knob = [dx * scale, dy * scale];
+  const percent = stickPercent(Math.min(len / r, 1) * 100);
+  joy = percent ? [Math.round(((Math.atan2(-dy, dx) * 180 / Math.PI) + 360) % 360), percent] : null;
+  drawStick();
+}
+document.querySelectorAll("[data-speed]").forEach((b) => b.onclick = () => { fast = b.dataset.speed === "1"; document.querySelectorAll("[data-speed]").forEach((x) => x.classList.toggle("on", x === b)); });
+// move and fold the joystick panel
+const joyEl = $("joy");
+function placeJoy() { if (prefs.joy) Object.assign(joyEl.style, { left: prefs.joy[0] + "px", top: prefs.joy[1] + "px", bottom: "auto" }); }
+joyEl.querySelector(".grip").onpointerdown = (e) => {
+  if (e.target.id === "foldBtn") return;
+  const r = joyEl.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+  const mv = (ev) => { prefs.joy = [Math.max(0, Math.min(innerWidth - r.width, ev.clientX - ox)), Math.max(0, Math.min(innerHeight - r.height, ev.clientY - oy))]; placeJoy(); };
+  const up = () => { removeEventListener("pointermove", mv); removeEventListener("pointerup", up); save(); };
+  addEventListener("pointermove", mv); addEventListener("pointerup", up);
+};
+const foldButton = document.createElement("button");
+foldButton.textContent = "✥"; foldButton.style.cssText = "display:none;font-size:22px;background:transparent;width:52px;height:52px;border-radius:50%";
+joyEl.appendChild(foldButton);
+$("foldBtn").onclick = () => { for (const ch of joyEl.children) ch.style.display = ch === foldButton ? "" : "none"; joyEl.classList.add("folded"); prefs.joyFolded = true; save(); };
+foldButton.onclick = () => { for (const ch of joyEl.children) ch.style.display = ch === foldButton ? "none" : ""; joyEl.classList.remove("folded"); prefs.joyFolded = false; save(); };
+
+// ---------- settings ----------
+$("bridge").value = prefs.bridge;
+$("reconnect").onclick = () => { prefs.bridge = $("bridge").value.trim(); save(); connect(); };
+for (const id of ["dms", "hudOn", "flipH", "flipV"]) {
+  const key = id === "hudOn" ? "hud" : id; $(id).checked = prefs[key];
+  $(id).onchange = (e) => { prefs[key] = e.target.checked; save(); layout(); drawHud(); updateReticleCard(); };
+}
+$("storage").value = prefs.storage;
+$("storage").onchange = (e) => { prefs.storage = e.target.value; save(); };
+
+// ---------- start ----------
+placeJoy(); drawStick(); setControls(prefs.controlsOpen); updateReticleCard();
+if (prefs.joyFolded) $("foldBtn").onclick();
+connect();
+</script>
+</body>
+</html>

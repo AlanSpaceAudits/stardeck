@@ -17,4 +17,5 @@ rsa = { version = "0.9.10", features = ["sha1"] }
 serde_json = "1.0.154"
 sha1 = "0.10"
 socket2 = { version = "0.6.5", features = ["all"] }
+tungstenite = "0.24"
 zip = { version = "9.0.2", default-features = false, features = ["deflate"] }

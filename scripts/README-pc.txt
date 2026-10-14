@@ -12,3 +12,7 @@ Saved frames and timelapse folders go into the folder the app starts in.
 ffmpeg is included for the live video. It is a build from https://github.com/BtbN/FFmpeg-Builds
 under the LGPL, version 2.1 or later. Source: https://ffmpeg.org
 Object catalogue: OpenNGC by Mattia Verga, CC-BY-SA-4.0.
+
+Web version: run stardeck-bridge (Windows: stardeck-bridge.exe) and open http://127.0.0.1:4791/
+or https://alanspaceaudits.github.io/stardeck/ . Add --lan to use the page from a phone or tablet
+on the same network (open http://<this computer's address>:4791/ there).

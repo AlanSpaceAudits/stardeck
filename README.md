@@ -4,6 +4,16 @@ Control apps for ZWO Seestar telescopes. There is a PC app for Windows and Linux
 
 Developed and tested on a Seestar S50 with firmware 8.46. The S30 uses the same protocol, but it is not tested yet.
 
+## Web version
+
+Open **https://alanspaceaudits.github.io/stardeck/** in a browser. The page needs the StarDeck bridge running on a computer
+near the Seestar: start `stardeck-bridge` (Windows: `stardeck-bridge.exe`) from the PC download and keep it open. The bridge
+also serves the same page at `http://127.0.0.1:4791/`. To use the page from a phone or tablet on the same network, start the
+bridge with `--lan` and open `http://<computer address>:4791/` there.
+
+A browser cannot open the Seestar's control port or its RTSP video itself, so the bridge relays them: commands over a
+WebSocket, video as MJPEG. Photos and videos save on the Seestar; the HUD copy downloads in the browser (PNG, or WebM for video).
+
 ## Contents
 
 - [Download](#download)
