@@ -16,3 +16,4 @@ shots_home.png
 __pycache__/
 vendor_ffmpeg/
 shots/
+.claude/
