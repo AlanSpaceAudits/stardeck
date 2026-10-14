@@ -40,7 +40,12 @@ fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
     fun v(k: String) = pointing?.optDouble(k)?.takeIf { !it.isNaN() }?.let { fmtDeg(it, Prefs.dms, signed = k == "alt") } ?: "--"
     val fix = gps.fix
     val fps = LiveStats.fps?.let { "  %.1f fps".format(Locale.US, it) } ?: ""
-    return listOf(
+    val dec = pointing?.optDouble("dec")?.takeIf { !it.isNaN() }
+    val sized = Reticle.shape == Reticle.CIRCLE || Reticle.shape == Reticle.BOX || Reticle.shape == Reticle.CROSS_CIRCLE
+    val reticle = if (Reticle.label && sized) listOf(
+        "Reticle ${formatArcsec(Reticle.sizeArcsec)}" + (dec?.let { "  crossing %.2f s".format(Locale.US, crossingSeconds(Reticle.sizeArcsec, it)) } ?: ""),
+    ) else emptyList()
+    return reticle + listOf(
         "Az ${v("az")}  El ${v("alt")}",
         if (fix != null) "Lat ${fmtDeg(fix.latitude, Prefs.dms, digits = 5)}  Lon ${fmtDeg(fix.longitude, Prefs.dms, digits = 5)}" else "Lat --  Lon --",
         utcFormat("yyyy-MM-dd HH:mm:ss.SSS").format(Date(gps.utcMillis())) + " UTC" + fps,
@@ -48,18 +53,14 @@ fun hudLines(pointing: JSONObject?, gps: Gps): List<String> {
 }
 
 /** Flips the frame as displayed, then draws the crosshair and data block into it. */
-fun burnHud(frame: Bitmap, flipH: Boolean, flipV: Boolean, lines: List<String>?): Bitmap {
+fun burnHud(frame: Bitmap, flipH: Boolean, flipV: Boolean, lines: List<String>?, reticlePxPerArcsec: Double? = null): Bitmap {
     val m = Matrix().apply { preScale(if (flipH) -1f else 1f, if (flipV) -1f else 1f) }
     val out = Bitmap.createBitmap(frame, 0, 0, frame.width, frame.height, m, false).copy(Bitmap.Config.ARGB_8888, true)
-    if (lines == null) return out
     val c = Canvas(out)
+    // the reticle is scaled to sky angle: drawing units per arcsecond of this frame
+    burnReticle(c, out.width, out.height, reticlePxPerArcsec)
+    if (lines == null) return out
     val (w, h) = out.width.toFloat() to out.height.toFloat()
-    val red = Paint().apply { color = Color.rgb(255, 60, 60); strokeWidth = (h / 400).coerceAtLeast(2f) }
-    val (arm, gap) = h / 20 to h / 100
-    c.drawLine(w / 2 - arm, h / 2, w / 2 - gap, h / 2, red)
-    c.drawLine(w / 2 + gap, h / 2, w / 2 + arm, h / 2, red)
-    c.drawLine(w / 2, h / 2 - arm, w / 2, h / 2 - gap, red)
-    c.drawLine(w / 2, h / 2 + gap, w / 2, h / 2 + arm, red)
     val text = Paint().apply { color = Color.WHITE; typeface = Typeface.MONOSPACE; textSize = (h / 45).coerceAtLeast(12f); isAntiAlias = true }
     val lineH = text.fontSpacing
     val pad = lineH / 3

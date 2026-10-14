@@ -110,6 +110,10 @@ class Link(private val keyPem: String) {
     var battery by mutableStateOf("")
     /** the scope has a second (wide-angle) camera, as the S30 does */
     var hasWideCamera by mutableStateOf(false)
+    /** telescope camera: pixel size in µm, focal length in mm, sensor width in pixels; for sky-angle scales */
+    var pixelUm by mutableStateOf<Double?>(null)
+    var focalMm by mutableStateOf<Double?>(null)
+    var chipWidth by mutableStateOf<Int?>(null)
     /** latitude, east longitude stored in the scope */
     var scopeLatLon by mutableStateOf<Pair<Double, Double>?>(null)
     /** balance_sensor and compass_sensor, refreshed quickly while the level display is open */
@@ -164,12 +168,17 @@ class Link(private val keyPem: String) {
                         if (refresh || System.currentTimeMillis() - lastSettings > 15000) {
                             refresh = false
                             lastSettings = System.currentTimeMillis()
-                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status").put("second_camera"))).optJSONObject("result") ?: JSONObject()
+                            val state = s.call("get_device_state", JSONObject().put("keys", JSONArray().put("setting").put("location_lon_lat").put("pi_status").put("second_camera").put("camera").put("device"))).optJSONObject("result") ?: JSONObject()
                             val setting = state.optJSONObject("setting") ?: JSONObject()
                             settings = bools(setting)
                             this@Link.setting = setting
                             stackSettings = bools(setting.optJSONObject("stack") ?: JSONObject())
                             hasWideCamera = state.optJSONObject("second_camera") != null
+                            state.optJSONObject("camera")?.let { cam ->
+                                pixelUm = cam.optDouble("pixel_size_um").takeIf { it > 0 }
+                                cam.optJSONArray("chip_size")?.let { chipWidth = it.optInt(0).takeIf { w -> w > 0 } }
+                            }
+                            state.optJSONObject("device")?.optDouble("focal_len")?.takeIf { it > 0 }?.let { focalMm = it }
                             state.optJSONObject("pi_status")?.let { battery = "${it.optInt("battery_capacity")}%" + if (it.optBoolean("charge_online")) " ⚡" else "" }
                             val here = state.optJSONArray("location_lon_lat")
                             scopeLocation = here?.let { "lat %.4f, lon %.4f".format(it.optDouble(1), it.optDouble(0)) } ?: ""
@@ -281,6 +290,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var planetCentre by remember { mutableStateOf(false) }
     var zoom by remember { mutableIntStateOf(0) }
     var showFocusCard by remember { mutableStateOf(false) }
+    var showReticle by remember { mutableStateOf(false) }
     var recordStart by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var host by remember { mutableStateOf("SeeStar.local") }
@@ -295,7 +305,13 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var showAdjust by remember { mutableStateOf(false) }
     val appPrefs = remember { context.getSharedPreferences("stardeck", android.content.Context.MODE_PRIVATE) }
     var controlsOpen by remember { mutableStateOf(appPrefs.getBoolean("controls_open", false)) }
+    fun saveReticle() = appPrefs.edit().putInt("reticle_shape", Reticle.shape).putFloat("reticle_arcsec", Reticle.sizeArcsec.toFloat())
+        .putBoolean("reticle_rings", Reticle.rings).putBoolean("reticle_label", Reticle.label).apply()
     LaunchedEffect(Unit) {
+        Reticle.shape = appPrefs.getInt("reticle_shape", Reticle.CROSS)
+        Reticle.sizeArcsec = appPrefs.getFloat("reticle_arcsec", 600f).toDouble()
+        Reticle.rings = appPrefs.getBoolean("reticle_rings", false)
+        Reticle.label = appPrefs.getBoolean("reticle_label", true)
         Storage.target = appPrefs.getInt("storage", Storage.BOTH)
         Storage.raw = appPrefs.getBoolean("storage_raw", false)
     }
@@ -321,6 +337,17 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     var note by remember { mutableStateOf("") }
     var telemetry by remember { mutableStateOf("") }
     var player by remember { mutableStateOf<PlayerView?>(null) }
+    // Sky angle of one video pixel: the camera's own pixel scale, times sensor pixels per video pixel,
+    // divided by the zoom (the zoomed video shows the centre of the sensor).
+    val videoWidth = (player?.player as? ExoPlayer)?.videoSize?.width?.takeIf { it > 0 }
+    val arcsecPerVideoPx = run {
+        val pix = link.pixelUm ?: return@run null
+        val focal = link.focalMm ?: return@run null
+        val chip = link.chipWidth ?: return@run null
+        val vw = videoWidth ?: return@run null
+        arcsecPerPixel(pix, focal) * chip / vw / listOf(1.0, 2.0, 4.0)[zoom]
+    }
+    fun reticleScale(frameWidth: Int): Double? = arcsecPerVideoPx?.let { a -> videoWidth?.let { vw -> frameWidth.toDouble() / vw / a } }
     var tick by remember { mutableLongStateOf(0L) } // redraws the HUD clock
 
     // GPS: ask once, then listen while the screen is shown.
@@ -373,7 +400,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
     fun snapshot(): Saved? {
         val frame = (player?.videoSurfaceView as? TextureView)?.bitmap ?: return null
         val lines = if (hud) hudLines(link.pointing, gps) else null
-        return savePng(context, burnHud(frame, flipH, flipV, lines), gps.utcMillis())
+        return savePng(context, burnHud(frame, flipH, flipV, lines, reticleScale(frame.width)), gps.utcMillis())
     }
 
     // The Seestar cannot draw the HUD itself, so the phone makes the HUD copy and, when the Seestar is a
@@ -416,7 +443,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             if (frame != null) {
                 val lines = if (hud) hudLines(link.pointing, gps) else null
                 val (fh, fv) = flipH to flipV
-                runCatching { withContext(Dispatchers.Default) { r.draw(burnHud(frame, fh, fv, lines)) } }
+                runCatching { withContext(Dispatchers.Default) { r.draw(burnHud(frame, fh, fv, lines, reticleScale(frame.width))) } }
                     .onFailure { note = "recording: ${it.message}" }
             }
             delay(66)
@@ -505,22 +532,14 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 }
             }
         }
-        if (hud && screenSize.width > 0) {
+        if ((hud || Reticle.shape != Reticle.OFF) && screenSize.width > 0) {
             val density = androidx.compose.ui.platform.LocalDensity.current
             val (fw, fh) = screenSize.width.toFloat() to screenSize.height.toFloat()
             val w = minOf(fw, fh * aspect)
             val h = w / aspect
             Box(Modifier.align(Alignment.Center).size(with(density) { w.toDp() }, with(density) { h.toDp() })) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val c = Offset(size.width / 2, size.height / 2)
-                    val (arm, gap) = size.minDimension / 12 to size.minDimension / 60
-                    val red = Color(0xFFFF3C3C)
-                    drawLine(red, c - Offset(arm, 0f), c - Offset(gap, 0f), 3f)
-                    drawLine(red, c + Offset(gap, 0f), c + Offset(arm, 0f), 3f)
-                    drawLine(red, c - Offset(0f, arm), c - Offset(0f, gap), 3f)
-                    drawLine(red, c + Offset(0f, gap), c + Offset(0f, arm), 3f)
-                }
-                Text(
+                Canvas(Modifier.fillMaxSize()) { drawReticle(arcsecPerVideoPx?.let { a -> videoWidth?.let { vw -> size.width / vw / a } }) }
+                if (hud) Text(
                     lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, color = Color.White,
                     modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color(0xA5000000)).padding(4.dp),
                 )
@@ -576,6 +595,7 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
                 OverlayButton("Park") { link.send("scope_park") }
                 OverlayButton("Exposure") { showAdjust = !showAdjust }
                 OverlayButton("Focus") { showFocusCard = !showFocusCard }
+                OverlayButton("Reticle") { showReticle = !showReticle }
                 if (link.hasWideCamera) OverlayButton(if (wideCam) "Camera: wide" else "Camera: telescope") {
                     wideCam = !wideCam
                     link.send("set_setting", JSONObject().put("selected_cam", if (wideCam) "SecondView" else "View"))
@@ -605,6 +625,10 @@ fun Screen(link: Link, catalog: Catalog, gps: Gps, starlog: StarlogState, savePr
             MovableJoystick(joyLayout, screenSize, fast, { fast = it }, link.tracking, { link.send("scope_set_track_state", it) }, { joy = it })
         }
         if (showAdjust) AdjustPanel(link, { showAdjust = false }, Modifier.align(Alignment.Center))
+        if (showReticle) FloatingCard("Reticle", { showReticle = false }, Modifier.align(Alignment.Center).width(340.dp)) {
+            val fov = arcsecPerVideoPx?.let { a -> (player?.player as? ExoPlayer)?.videoSize?.takeIf { it.width > 0 }?.let { (it.width * a) to (it.height * a) } }
+            ReticlePanel(arcsecPerVideoPx, fov, link.pointing?.optDouble("dec")?.takeIf { !it.isNaN() }, { gps.utcMillis() }) { saveReticle() }
+        }
         if (showFocusCard) FloatingCard("Focus", { showFocusCard = false }, Modifier.align(Alignment.Center).width(320.dp)) { FocusPanel(link) }
 
         // capture modes and shutter: shown with the Controls menu, and while a recording or time-lapse runs
